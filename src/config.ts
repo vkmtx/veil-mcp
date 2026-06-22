@@ -13,6 +13,11 @@ function bool(name: string, def: boolean): boolean {
   return v === "1" || v.toLowerCase() === "true";
 }
 
+function str(name: string, def: string): string {
+  const v = process.env[name];
+  return v === undefined ? def : v;
+}
+
 export const config = {
   /** stdout shorter than this (in lines) is returned whole. */
   inlineMaxLines: num("VEIL_INLINE_MAX_LINES", 45),
@@ -31,6 +36,12 @@ export const config = {
   maxStreamBytes: num("VEIL_MAX_STREAM_BYTES", 5_000_000),
   /** max number of run records kept addressable (oldest evicted). 0 = unbounded. */
   maxRecords: num("VEIL_MAX_RECORDS", 500),
+  /** base dir for the on-disk record store, so sh_detail survives a server restart.
+   *  "" = auto (XDG_STATE_HOME/veil, else ~/.local/state/veil, else $TMPDIR/veil).
+   *  "none"/"off"/"memory" = disable disk, keep records in memory only. */
+  stateDir: str("VEIL_STATE_DIR", ""),
+  /** persisted records older than this (ms) are pruned on boot. 0 = keep forever. */
+  recordTtlMs: num("VEIL_RECORD_TTL_MS", 24 * 60 * 60 * 1000),
   /** compute the git effect-diff (two `git status` calls per run). Disable in huge
    *  repos where that is too slow; a `changed` assertion still forces it. */
   effects: bool("VEIL_EFFECTS", true),

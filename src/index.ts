@@ -12,9 +12,15 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { buildServer } from "./server.js";
+import { runInit } from "./init.js";
 
-const server = buildServer();
-const transport = new StdioServerTransport();
-await server.connect(transport);
-// stdout is the MCP channel; logs must go to stderr.
-console.error("veil-mcp running on stdio");
+// `veil-mcp init` — one-off project setup, not the server. Handle and exit.
+if (process.argv[2] === "init") {
+  runInit();
+} else {
+  const server = buildServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  // stdout is the MCP channel; logs must go to stderr.
+  console.error("veil-mcp running on stdio");
+}

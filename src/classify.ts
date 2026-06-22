@@ -2,10 +2,13 @@
  * Feature K (lite) + B foundation — static command classification.
  *
  * Parses a command string WITHOUT executing it to predict its blast radius and,
- * for known builtins, its file effects. This is best-effort static analysis: shell
- * is Turing-complete, so anything with pipes/expansion/subshells is marked
- * "complex" and only scanned for known-dangerous patterns. No enforcement here —
- * real isolation (landlock/seccomp/sandbox-exec) is a separate kernel layer.
+ * for known builtins, its file effects. This is best-effort STATIC analysis, not an
+ * execution dry-run: shell is Turing-complete, so we can never be exhaustive. A
+ * top-level pipeline/list (`a && b`, `c | d`, `e; f`) IS decomposed and each segment
+ * classified, with the worst case winning the label. Anything with substitution
+ * (`$(...)`), redirects, globs, or subshells is genuinely undecidable and stays
+ * "complex" — scanned only for known-dangerous patterns. No enforcement here — real
+ * isolation (landlock/seccomp/sandbox-exec) is a separate kernel layer.
  *
  * Errors are biased SAFE: the destructive-token scan runs on the raw string, so a
  * dangerous pattern in a quoted ARGUMENT (e.g. `echo "rm -rf /"`) is over-flagged
@@ -59,9 +62,17 @@ const DESTRUCTIVE_TOKENS = [
 
 const SHELL_OPS = /[|;&]|&&|\|\||\$\(|`|>|<|\*|\?/;
 
-/** Naive whitespace tokenizer — only valid for simple, operator-free commands. */
+/** Strip a single matched pair of surrounding quotes from a token, so a quoted
+ *  command/subcommand classifies like its bare form (`git "reset"` → `reset`).
+ *  Without this a quoted destructive subcommand silently under-flags to "unknown". */
+function stripMatchedQuotes(t: string): string {
+  return t.length >= 2 && (t[0] === '"' || t[0] === "'") && t[t.length - 1] === t[0] ? t.slice(1, -1) : t;
+}
+
+/** Naive whitespace tokenizer — only valid for simple, operator-free commands.
+ *  Surrounding quotes are stripped per token (see stripMatchedQuotes). */
 function tokens(cmd: string): string[] {
-  return cmd.trim().split(/\s+/).filter(Boolean);
+  return cmd.trim().split(/\s+/).filter(Boolean).map(stripMatchedQuotes);
 }
 
 function nonFlagArgs(toks: string[]): string[] {
@@ -216,6 +227,30 @@ function classifyGit(toks: string[]): Classification {
   return { category: "unknown", reversible: false, mutations: [], note: `unrecognized git subcommand: ${sub || "(none)"}` };
 }
 
+/**
+ * find's blast radius is its ACTION, not the binary. `-delete` removes every match;
+ * `-exec`/`-execdir`/`-ok`/`-okdir` run an arbitrary utility per match. So classify
+ * that embedded command instead of trusting `find` as read-only — the prior bug read
+ * `find … -exec shred {} \;` (and `-execdir rm`, `-exec /bin/rm`, `-exec git reset
+ * --hard`) as read-only, the worst possible under-flag. A read-only payload (`-exec
+ * cat`) still correctly stays read-only.
+ */
+function classifyFind(toks: string[]): Classification {
+  if (toks.includes("-delete")) {
+    return { category: "destructive", reversible: false, mutations: [{ op: "delete", paths: ["(files matched by find)"] }], note: "find -delete removes matched files" };
+  }
+  const ei = toks.findIndex((t) => t === "-exec" || t === "-execdir" || t === "-ok" || t === "-okdir");
+  if (ei >= 0) {
+    const after = toks.slice(ei + 1);
+    // the payload runs from the token after -exec up to a terminating `;` / `\;` / `+`
+    const term = after.findIndex((t) => t === ";" || t === "\\;" || t === "+");
+    const sub = (term >= 0 ? after.slice(0, term) : after).filter((t) => t !== "{}").join(" ").trim();
+    const inner: Classification = sub ? classifyAtom(sub) : { category: "unknown", reversible: false, mutations: [] };
+    return { ...inner, note: `find ${toks[ei]} runs \`${sub || "?"}\`${inner.note ? ` — ${inner.note}` : ""}` };
+  }
+  return { category: "read-only", reversible: true, mutations: [] };
+}
+
 const ALWAYS_INTERACTIVE = new Set([
   "vim", "vi", "nvim", "nano", "emacs", "pico", "joe", "less", "more", "most", "top", "htop", "man", "vimtutor",
 ]);
@@ -238,6 +273,79 @@ export function looksInteractive(command: string): boolean {
   return false;
 }
 
+/** Severity order for aggregating a pipeline/list: the worst segment wins the label,
+ *  but every segment's mutations and notes are merged so detail isn't lost. */
+const RANK: Record<Category, number> = {
+  destructive: 5,
+  network: 4,
+  mutating: 3,
+  unknown: 2,
+  "read-only": 1,
+  complex: 0,
+};
+
+/**
+ * Split a command into top-level segments at `&&`, `||`, `;`, and `|`, respecting
+ * quotes. Returns null (→ caller treats it as "complex") if it hits a construct we
+ * refuse to guess through: command substitution (`$(`/backtick), redirects (`<`/`>`),
+ * globs (`*`/`?`), subshells/braces, background (`&`), or an unterminated quote.
+ * This turns the common `cd x && npm build` / `cat f | grep y` shapes from an opaque
+ * "complex" into a real per-segment classification, without pretending to parse the
+ * genuinely-undecidable cases.
+ */
+function splitSegments(cmd: string): string[] | null {
+  const segs: string[] = [];
+  let cur = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    const next = cmd[i + 1];
+    if (quote) {
+      cur += c;
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "'" || c === '"') { quote = c; cur += c; continue; }
+    // A backslash escapes the next char: it is literal text, never a split point or
+    // a bail (so `find … \;`, `\&`, `\|` stay inside the atom rather than truncating
+    // it — the prior bug dropped a `find -exec` payload by splitting on the `\;`).
+    if (c === "\\") { cur += c + (next ?? ""); i++; continue; }
+    // constructs we won't statically reason through → bail to "complex"
+    if (c === "`" || (c === "$" && next === "(")) return null; // command substitution
+    if (c === "<" || c === ">") return null;                   // redirect (target unparsed)
+    if (c === "*" || c === "?") return null;                   // glob
+    if (c === "(" || c === ")") return null;                   // subshell (braces are
+    //                                                         // usually literal args:
+    //                                                         // xargs/find `{}`, brace
+    //                                                         // expansion — let the
+    //                                                         // atom classifier judge)
+    // split points
+    if (c === "&" && next === "&") { segs.push(cur); cur = ""; i++; continue; }
+    if (c === "&") return null; // background — changes execution semantics
+    if (c === "|" && next === "|") { segs.push(cur); cur = ""; i++; continue; }
+    if (c === "|") { segs.push(cur); cur = ""; continue; }
+    if (c === ";") { segs.push(cur); cur = ""; continue; }
+    cur += c;
+  }
+  if (quote) return null; // unterminated quote — don't guess
+  segs.push(cur);
+  return segs.map((s) => s.trim()).filter(Boolean);
+}
+
+/** Combine segment classifications into one: worst category wins, mutations and
+ *  notes merge, and the result is reversible only if every segment is. */
+function aggregate(parts: Classification[]): Classification {
+  let worst = parts[0];
+  for (const p of parts) if (RANK[p.category] > RANK[worst.category]) worst = p;
+  const notes = parts.map((p) => p.note).filter(Boolean) as string[];
+  return {
+    category: worst.category,
+    reversible: parts.every((p) => p.reversible),
+    mutations: parts.flatMap((p) => p.mutations),
+    note: `pipeline/list of ${parts.length} segments; worst = ${worst.category}` + (notes.length ? ` — ${notes.join("; ")}` : ""),
+  };
+}
+
 export function classify(command: string): Classification {
   const cmd = command.trim();
 
@@ -253,15 +361,28 @@ export function classify(command: string): Classification {
     }
   }
 
-  if (SHELL_OPS.test(cmd)) {
-    return {
-      category: "complex",
-      reversible: false,
-      mutations: [],
-      note: "contains shell operators/expansion; not statically analyzable — review manually",
-    };
+  // Decompose top-level pipelines/lists. A non-null result means the splitter ran
+  // cleanly (quotes respected, no undecidable construct): classify each atom and take
+  // the worst case, or classify the lone atom directly — note a quoted operator
+  // (`echo "a && b"`) yields one clean atom, NOT a false "complex". splitSegments
+  // returns null ONLY for the genuinely-undecidable shells (substitution, redirect,
+  // glob, subshell, background, unterminated quote), which stay "complex".
+  const segs = splitSegments(cmd);
+  if (segs) {
+    return segs.length > 1 ? aggregate(segs.map((s) => classifyAtom(s))) : classifyAtom(segs[0] ?? cmd);
   }
 
+  return {
+    category: "complex",
+    reversible: false,
+    mutations: [],
+    note: "contains shell substitution/redirection/glob; not statically analyzable — review manually",
+  };
+}
+
+/** Classify a SINGLE command atom (no top-level connectors). */
+function classifyAtom(command: string): Classification {
+  const cmd = command.trim();
   const toks = unwrap(tokens(cmd));
   const bin = (toks[0] ?? "").split("/").pop() ?? "";
   const args = nonFlagArgs(toks);
@@ -305,6 +426,11 @@ export function classify(command: string): Classification {
 
   if (bin === "git") {
     return classifyGit(toks);
+  }
+  // find is in READ_ONLY for plain searches, but its -exec/-delete actions are not —
+  // classify the action, not the binary. (Must precede the READ_ONLY check below.)
+  if (bin === "find") {
+    return classifyFind(toks);
   }
 
   if (NETWORK.has(bin)) {

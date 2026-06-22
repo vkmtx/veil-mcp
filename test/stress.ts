@@ -11,6 +11,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync 
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
+// Keep stress runs out of the real on-disk record store (child server inherits this).
+process.env.VEIL_STATE_DIR = mkdtempSync(join(tmpdir(), "veil-stress-state-"));
+
 const execSyncQuiet = (cmd: string, cwd: string) => execSync(cmd, { cwd, shell: "/bin/bash", stdio: "ignore" });
 
 let anomalies = 0;
@@ -115,7 +118,14 @@ console.log("D. classify / plan exotica");
     ["env FOO=1 rm -rf x", "destructive"],
     ["nice -n 5 rm -fr y", "destructive"],
     ["ls", "read-only"],
-    ["cat a | grep b", "complex"],
+    // segment-aware: a pipe/list of analyzable atoms is classified, worst case wins.
+    ["cat a | grep b", "read-only"],
+    ["cat a | grep b > c", "complex"], // redirect is undecidable → stays complex
+    ["cd build && cp a b", "mutating"],
+    // find's action, not the binary — never under-flag an -exec payload.
+    ["find . -exec shred {} \\;", "destructive"],
+    ["find . -exec cat {} \\;", "read-only"],
+    ["git 'reset' --hard", "destructive"], // quoted subcommand classifies like bare
     // dangerous patterns are flagged even inside complex commands (the rm DOES run):
     ["echo $(rm -rf x)", "destructive"],
     ["true && rm -rf z", "destructive"],

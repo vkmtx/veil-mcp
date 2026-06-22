@@ -7,7 +7,7 @@ import { registerShPlan } from "./tools/sh_plan.js";
 import { registerSnapshotTools } from "./tools/sh_snapshot.js";
 
 export function buildServer(): McpServer {
-  const server = new McpServer({ name: "veil-mcp", version: "0.3.0" });
+  const server = new McpServer({ name: "veil-mcp", version: "0.4.0" });
   registerShRun(server); // exec + I/J/H/G/M
   registerShDetail(server); // J
   registerShPlan(server); // B + K-lite
