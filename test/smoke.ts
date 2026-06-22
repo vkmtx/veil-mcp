@@ -147,6 +147,16 @@ check("extractSignals finds failure lines", extractSignals(["info", "FAILED test
 const midFail = Array.from({ length: 100 }, (_, i) => (i === 50 ? "ERROR boom in the middle" : `line ${i}`)).join("\n");
 const midCondensed = condense(midFail, "u", "stdout");
 check("condense surfaces mid-stream ERROR", midCondensed.includes("ERROR boom in the middle") && midCondensed.includes("flagged"));
+// crash/failure idioms that contain no "error"/"fail" token must still surface.
+for (const idiom of ["Segmentation fault (core dumped)", "SIGSEGV", "Aborted", "Killed", "CONFLICT (content): Merge conflict in x", "! [rejected] main -> main", "undefined reference to `foo`", "ld: symbol(s) not found", "Operation timed out", "found 3 high severity vulnerabilities"]) {
+  check(`signals surfaces ${JSON.stringify(idiom)}`, extractSignals([idiom]).length === 1);
+}
+check("signals ignores a benign line (no over-flag)", extractSignals(["compiling module ok"]).length === 0);
+// more distinct mid-stream signals than the inline cap must be COUNTED, not
+// silently dropped: the marker reports the true total plus an overflow note.
+const manySignals = Array.from({ length: 60 }, (_, i) => (i >= 25 && i < 33 ? `ERROR case ${i}` : `line ${i}`)).join("\n");
+const manyCondensed = condense(manySignals, "u", "stdout");
+check("condense reports true flagged total beyond the inline cap", manyCondensed.includes("8 flagged") && manyCondensed.includes("+3 more"));
 
 // truncation honesty: marker present, torn first fragment dropped.
 const truncRendered = condense("torn-fragment-line\nreal line A\nreal line B", "u9", "stdout", { truncated: true });

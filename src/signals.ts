@@ -5,14 +5,14 @@
  * stream — a single `FAIL`/`error`/`warning` line buried there is silently
  * elided, so a success-shaped quiet result can hide a real problem. This module
  * scans a slice of lines for failure/warning signal and returns the salient
- * ones (deduped, capped), so the renderer can surface them even while hiding the
+ * ones (deduped), so the renderer can surface them even while hiding the
  * bulk. It is the one place responsible for "what in this output matters".
  */
 
 // Word/glyph signals are case-insensitive; the pytest-style `E`/`FAIL` line anchor
 // is case-SENSITIVE (a /i flag here would flag any line starting with a lone "e").
 const SIGNAL_CI =
-  /\b(errors?|fail(?:ed|ure|ing|s)?|fatal|panic|exception|traceback|denied|cannot|unable|warn(?:ing)?s?|deprecat\w*)\b|✗|✘/i;
+  /\b(errors?|fail(?:ed|ure|ing|s)?|fatal|panic|exception|traceback|denied|cannot|unable|warn(?:ing)?s?|deprecat\w*|abort(?:ed|ing)?|killed|segfault|segmentation\s+fault|core\s+dumped|sig(?:segv|abrt|bus|kill|term|ill|fpe)|oom|out\s+of\s+memory|conflict|rejected|undefined\s+reference|symbols?\s+not\s+found|not\s+found|timed?\s*out|timeout|vulnerabilit\w+|unhealthy|refused|reset\s+by\s+peer|no\s+such\s+file)\b|✗|✘/i;
 const SIGNAL_CS = /^\s*(?:E\b|FAIL\b)/;
 
 /**
@@ -25,12 +25,14 @@ const SIGNAL_CS = /^\s*(?:E\b|FAIL\b)/;
 export function extractSignals(
   lines: string[],
   startLine = 0,
-  cap = 5,
   exclude: Set<string> = new Set(),
 ): string[] {
   const seen = new Set(exclude);
   const out: string[] = [];
-  for (let i = 0; i < lines.length && out.length < cap; i++) {
+  // Scan EVERY line — no cap here. The caller (render) decides how many to show
+  // inline and reports the TRUE total, so a 6th+ distinct mid-stream signal is
+  // never silently dropped from the count.
+  for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trimEnd();
     if (!line || !(SIGNAL_CI.test(line) || SIGNAL_CS.test(line))) continue;
     const key = line.trim();
