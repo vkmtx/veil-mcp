@@ -1,0 +1,37 @@
+/** Tunables. All overridable via env so behavior can be tuned without a rebuild. */
+
+function num(name: string, def: number): number {
+  const v = process.env[name];
+  if (v === undefined) return def;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : def;
+}
+
+function bool(name: string, def: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined) return def;
+  return v === "1" || v.toLowerCase() === "true";
+}
+
+export const config = {
+  /** stdout shorter than this (in lines) is returned whole. */
+  inlineMaxLines: num("VEIL_INLINE_MAX_LINES", 45),
+  /** lines kept from the top when condensing. */
+  headLines: num("VEIL_HEAD_LINES", 20),
+  /** lines kept from the bottom when condensing. */
+  tailLines: num("VEIL_TAIL_LINES", 20),
+  /** max chars of any single inline line; longer lines are capped with a pointer
+   *  (condensing is line-based, so without this a 1-line megablob would dump whole). */
+  maxLineChars: num("VEIL_MAX_LINE_CHARS", 1000),
+  /** on failure, show up to this many stderr lines inline before condensing. */
+  stderrInlineOnFail: num("VEIL_STDERR_INLINE_ON_FAIL", 60),
+  /** default per-command timeout (ms). 0 = no timeout. */
+  defaultTimeoutMs: num("VEIL_TIMEOUT_MS", 120_000),
+  /** max bytes of each stream stored per run (older bytes dropped). 0 = unbounded. */
+  maxStreamBytes: num("VEIL_MAX_STREAM_BYTES", 5_000_000),
+  /** max number of run records kept addressable (oldest evicted). 0 = unbounded. */
+  maxRecords: num("VEIL_MAX_RECORDS", 500),
+  /** compute the git effect-diff (two `git status` calls per run). Disable in huge
+   *  repos where that is too slow; a `changed` assertion still forces it. */
+  effects: bool("VEIL_EFFECTS", true),
+} as const;
