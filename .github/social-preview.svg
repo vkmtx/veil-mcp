@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', Menlo, monospace">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0c0f16"/>
+      <stop offset="1" stop-color="#080a0f"/>
+    </linearGradient>
+    <!-- the "veil": a soft curtain fading in from the right -->
+    <linearGradient id="veil" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity="0"/>
+      <stop offset="1" stop-color="#7c5cf0" stop-opacity="0.16"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect x="720" width="560" height="640" fill="url(#veil)"/>
+
+  <!-- faint vertical "veil" strands on the right -->
+  <g stroke="#a78bfa" stroke-opacity="0.10" stroke-width="1">
+    <line x1="900" y1="0" x2="900" y2="640"/>
+    <line x1="980" y1="0" x2="980" y2="640"/>
+    <line x1="1060" y1="0" x2="1060" y2="640"/>
+    <line x1="1140" y1="0" x2="1140" y2="640"/>
+    <line x1="1220" y1="0" x2="1220" y2="640"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="108" y="250" font-size="148" font-weight="700" letter-spacing="-4">
+    <tspan fill="#f0f3f8">veil</tspan><tspan fill="#a78bfa">-mcp</tspan>
+  </text>
+  <rect x="112" y="282" width="208" height="6" rx="3" fill="#a78bfa"/>
+
+  <!-- tagline -->
+  <text x="112" y="350" font-size="38" fill="#aeb6c2" font-family="-apple-system, 'Segoe UI', Inter, Helvetica, Arial, sans-serif">an agent-native shell, as an MCP server</text>
+
+  <!-- design line -->
+  <text x="112" y="400" font-size="23" fill="#6b7686" letter-spacing="0.5">quiet-by-default &#183; addressable &#183; lazy-detail &#183; structured-replaces-text</text>
+
+  <!-- terminal example -->
+  <rect x="112" y="446" width="1056" height="96" rx="12" fill="#10141c" stroke="#222b39" stroke-width="1.5"/>
+  <g transform="translate(140,468)">
+    <circle cx="0" cy="6" r="6" fill="#ff5f56"/>
+    <circle cx="22" cy="6" r="6" fill="#ffbd2e"/>
+    <circle cx="44" cy="6" r="6" fill="#27c93f"/>
+  </g>
+  <text x="140" y="518" font-size="25">
+    <tspan fill="#5b6675">$ </tspan><tspan fill="#cdd5e0">sh_run "npm run build"</tspan><tspan fill="#5b6675">  &#8594;  </tspan><tspan fill="#7ee787">{ ok: true, ms: 412 }</tspan>
+  </text>
+
+  <!-- footer -->
+  <text x="112" y="600" font-size="22" fill="#5b6675">github.com/vkmtx/veil-mcp</text>
+  <text x="1168" y="600" font-size="22" fill="#5b6675" text-anchor="end">MIT &#183; npx -y veil-mcp</text>
+</svg>
