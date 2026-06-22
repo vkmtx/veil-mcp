@@ -43,7 +43,7 @@
     <circle cx="44" cy="6" r="6" fill="#27c93f"/>
   </g>
   <text x="140" y="518" font-size="25">
-    <tspan fill="#5b6675">$ </tspan><tspan fill="#cdd5e0">sh_run "npm run build"</tspan><tspan fill="#5b6675">  &#8594;  </tspan><tspan fill="#7ee787">{ ok: true, ms: 412, files_changed: ["M dist/index.js"] }</tspan>
+    <tspan fill="#5b6675">$ </tspan><tspan fill="#cdd5e0">sh_run "npm run build"</tspan><tspan fill="#5b6675">  &#8594;  </tspan><tspan fill="#7ee787">{ ok: true, ms: 412 }</tspan>
   </text>
 
   <!-- footer -->
