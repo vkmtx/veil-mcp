@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in veil-mcp behaves incorrectly
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The tool call (sh_run/sh_plan/…) or command you ran, and the result you got back.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: veil-mcp version
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Environment
+      options:
+        - macOS
+        - Linux (bare metal / VM)
+        - Linux (container / Codespaces / CI)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Server stderr, the structured result, or an sh_detail dump. Redact secrets.
+      render: text
