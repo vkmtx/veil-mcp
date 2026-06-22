@@ -1,6 +1,7 @@
 # veil-mcp
 
 [![CI](https://github.com/vkmtx/veil-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/vkmtx/veil-mcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/veil-mcp.svg)](https://www.npmjs.com/package/veil-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen.svg)](package.json)
 [![MCP](https://img.shields.io/badge/MCP-server-8A2BE2.svg)](https://modelcontextprotocol.io)
@@ -33,19 +34,20 @@ rather than reimplementing a shell.
 
 ## Install
 
-Fastest path — no clone, no build (runs from GitHub via `npx`):
+Fastest path — no clone, no build (runs via `npx`):
 
 ```bash
-claude mcp add veil -- npx -y github:vkmtx/veil-mcp
-npx -y github:vkmtx/veil-mcp init     # drop the agent nudge into this project's CLAUDE.md
+claude mcp add veil -- npx -y veil-mcp
+npx -y veil-mcp init     # drop the agent nudge into this project's CLAUDE.md
 ```
 
-Once published to npm these become `npx -y veil-mcp` / `npx -y veil-mcp init`. For
-other MCP-speaking agents (Cursor, Windsurf, Zed, …), add to the MCP server config:
+For other MCP-speaking agents (Cursor, Windsurf, Zed, …), add to the MCP server config:
 
 ```jsonc
-{ "mcpServers": { "veil": { "command": "npx", "args": ["-y", "github:vkmtx/veil-mcp"] } } }
+{ "mcpServers": { "veil": { "command": "npx", "args": ["-y", "veil-mcp"] } } }
 ```
+
+Prefer to run straight from source, without npm? `npx -y github:vkmtx/veil-mcp` works too.
 
 `veil init` is the zero-friction setup step: it writes (idempotently) the block that
 tells the agent to prefer `sh_run`. See [Adoption](#adoption) for why that step exists.
@@ -247,6 +249,17 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on ma
 **and** Linux (with bubblewrap + strace installed), so the Linux-only sandbox (K+)
 and trace (A) paths are exercised where this dev machine (macOS) can't. The badge at
 the top reflects the latest run; the claims here are whatever that pipeline asserts.
+
+## Community
+
+Contributions, questions, and ideas are welcome — this is an early project and a good
+time to shape it.
+
+- 💬 **[Discussions](https://github.com/vkmtx/veil-mcp/discussions)** — questions, ideas, show-and-tell.
+- 🐛 **[Issues](https://github.com/vkmtx/veil-mcp/issues)** — bugs and feature requests (templates provided).
+- 🌱 **[Good first issues](https://github.com/vkmtx/veil-mcp/labels/good%20first%20issue)** — scoped entry points for a first PR.
+- 📖 **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev setup and the test gate.
+- 🤝 **[Code of Conduct](CODE_OF_CONDUCT.md)** — be decent.
 
 ## License
 
