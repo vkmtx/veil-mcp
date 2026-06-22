@@ -1,0 +1,28 @@
+name: release
+
+# Publishes to npm when a GitHub Release is published. Dormant until an NPM_TOKEN
+# repository secret is set — without it the publish step is skipped (the job still
+# runs and stays green), so the workflow is safe to merge before npm is wired up.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install
+      - run: npm run typecheck
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: npm publish --access public # prepublishOnly builds dist/
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
