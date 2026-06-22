@@ -144,9 +144,16 @@ writeFileSync(join(initDir3, "CLAUDE.md"), "# rules\n<!-- veil-mcp:start -->\nor
 runInit(initDir3);
 const repaired = readFileSync(join(initDir3, "CLAUDE.md"), "utf8");
 check("veil init repairs an orphan start marker (appends a complete block)", repaired.includes("<!-- veil-mcp:end -->") && repaired.includes("sh_run"));
+// review #9 (data loss): an orphan start marker BEFORE a complete block must NOT
+// let an in-place replace span across and delete the user content between them.
+const initDir4 = mkdtempSync(join(tmpdir(), "veil-init4-"));
+writeFileSync(join(initDir4, "CLAUDE.md"), `<!-- veil-mcp:start -->\nKEEP THIS USER LINE\n<!-- veil-mcp:start -->\n## veil-mcp\nbody\n<!-- veil-mcp:end -->\n`);
+runInit(initDir4);
+check("veil init never deletes content between mismatched markers", readFileSync(join(initDir4, "CLAUDE.md"), "utf8").includes("KEEP THIS USER LINE"));
 rmSync(initDir, { recursive: true, force: true });
 rmSync(initDir2, { recursive: true, force: true });
 rmSync(initDir3, { recursive: true, force: true });
+rmSync(initDir4, { recursive: true, force: true });
 const prof = buildProfile("/tmp/xcwd", {});
 check("profile confines writes and re-allows cwd", prof.includes("(deny file-write*)") && prof.includes("/tmp/xcwd"));
 check("profile denies network only when asked", buildProfile("/tmp/x", { network: false }).includes("(deny network*)") && !buildProfile("/tmp/x", {}).includes("(deny network*)"));

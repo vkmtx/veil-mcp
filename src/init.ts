@@ -44,18 +44,28 @@ export function runInit(cwd: string = process.cwd()): string {
   let action: string;
   if (existsSync(path)) {
     const cur = readFileSync(path, "utf8");
-    // Match the generated block ONLY when each marker is alone on its own line
-    // (^…$ with the `m` flag), so a marker quoted in prose can't be mistaken for it.
-    // Branch on the FULL-block match — not merely the presence of a start marker — so
-    // an orphaned/truncated start marker falls through to APPEND a complete block
-    // instead of silently rewriting nothing.
-    const re = new RegExp(`^${escapeRe(MARK_START)}$[\\s\\S]*?^${escapeRe(MARK_END)}$`, "m");
-    if (re.test(cur)) {
-      writeFileSync(path, cur.replace(re, NUDGE));
+    // Markers are matched ONLY when alone on their own line (^…$, `m` flag), so a
+    // marker quoted in prose can't be mistaken for the real thing. Count them: an
+    // in-place replace is safe ONLY when there is exactly one well-formed block —
+    // one start, one end, start before end. A lazy ^start$…^end$ span would, given
+    // an orphaned start marker sitting before a later complete block, stretch across
+    // the user content between them and delete it on replace. Any ambiguous topology
+    // (orphaned / duplicated / interleaved markers) therefore APPENDS a fresh block
+    // and never removes anything outside a single clean block.
+    const starts = [...cur.matchAll(new RegExp(`^${escapeRe(MARK_START)}$`, "mg"))];
+    const ends = [...cur.matchAll(new RegExp(`^${escapeRe(MARK_END)}$`, "mg"))];
+    const from = starts[0]?.index ?? -1;
+    const to = ends[0] ? ends[0].index + ends[0][0].length : -1;
+    if (starts.length === 1 && ends.length === 1 && from < to) {
+      writeFileSync(path, cur.slice(0, from) + NUDGE + cur.slice(to));
       action = "updated veil-mcp block in";
-    } else {
+    } else if (starts.length === 0 && ends.length === 0) {
       writeFileSync(path, `${cur.trimEnd()}\n\n${NUDGE}\n`);
       action = "appended veil-mcp nudge to";
+    } else {
+      // Stale/duplicated/interleaved markers — append a clean block, touch nothing else.
+      writeFileSync(path, `${cur.trimEnd()}\n\n${NUDGE}\n`);
+      action = "appended veil-mcp nudge (left existing markers intact) in";
     }
   } else {
     writeFileSync(path, `${NUDGE}\n`);
