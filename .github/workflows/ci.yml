@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Linux backends: bubblewrap (feature K+ sandbox) and strace (feature A trace).
+      # These make the platform-guarded e2e tests in test/smoke.ts actually run and
+      # validate the Linux paths the dev machine (macOS) can't exercise.
+      - name: Install Linux sandbox + tracer
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap strace
+          # Ubuntu 24.04+ restricts unprivileged user namespaces (AppArmor), which
+          # bubblewrap needs; relax it so the K+ sandbox e2e can actually run.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run backtest
