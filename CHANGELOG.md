@@ -3,7 +3,35 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
-## [0.3.0] — unreleased
+## [0.4.0] — 2026-06-22
+
+Hardening pass addressing six external critiques: weak adoption story, an
+over-stated `sh_plan`, sandbox portability, in-memory-only detail, and honesty of
+the value proposition.
+
+### Added
+- **J+ — disk-backed record store.** `sh_detail` now survives a server restart or
+  crash: records are persisted to a per-project dir under the OS state location
+  (`VEIL_STATE_DIR`, auto-resolved via XDG), cached in memory on the hot path, capped
+  by `VEIL_MAX_RECORDS`, and TTL-pruned on boot (`VEIL_RECORD_TTL_MS`, default 24h).
+  IDs are reserved by atomic exclusive file-create, so concurrent servers in the same
+  project never collide. All disk I/O is best-effort — a read-only FS degrades to
+  memory-only and never fails a run (`VEIL_STATE_DIR=none` forces it).
+- **`veil init`** — zero-friction per-project setup: idempotently writes the
+  "prefer `sh_run`" nudge into the project's `CLAUDE.md` and prints the MCP-registration
+  + guard-hook steps. Touches only `CLAUDE.md`, never global agent settings.
+
+### Changed
+- **`sh_plan` is segment-aware and honestly labeled.** A top-level pipeline/list
+  (`a && b`, `c | d`, `e; f`) is now decomposed and classified per-segment with the
+  worst case winning the label — `cat f | grep x` is read-only, `cd b && rm f` is
+  destructive — instead of an opaque `complex`. Substitution/redirect/glob remain
+  genuinely undecidable and stay `complex`. Docs reframe `sh_plan` as a **static
+  safety pre-check, not an execution dry-run**, and reposition the value proposition
+  (structure + safety first; token economy as a consequence) and the sandbox
+  (opt-in best-effort; unavailable in containers, by design).
+
+## [0.3.0] — 2026-06-22
 
 ### Added
 - **K — real sandbox enforcement.** `sandbox` option on `sh_run`: macOS

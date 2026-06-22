@@ -8,6 +8,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// Keep the benchmark's runs out of the real on-disk store (child server inherits this).
+process.env.VEIL_STATE_DIR = mkdtempSync(join(tmpdir(), "veil-backtest-state-"));
 
 const FLOOR_NET_PCT = 70; // weighted net savings must stay above this
 const FLOOR_VERBOSE_PCT = 85; // each verbose case must save at least this

@@ -39,17 +39,18 @@ evaluate `assert`, and store the record for `sh_detail`.
 | `effects.ts`         | git porcelain before/after diff; or effects derived from a trace (skips git). |
 | `render.ts`          | Token-aware condensing (head+tail+pointer); truncation-aware; CR-normalized line counting. |
 | `signals.ts`         | Content-aware extraction of FAIL/error/warn lines from the hidden middle. |
-| `store.ts`           | Addressable per-session record store with eviction.         |
+| `store.ts`           | Addressable record store — memory cache + per-project disk persistence (survives restart), atomic id reservation, TTL prune + `VEIL_MAX_RECORDS` eviction; best-effort (degrades to memory-only). |
+| `init.ts`            | `veil init` — idempotent per-project `CLAUDE.md` nudge writer + setup steps. |
 | `assert.ts`          | Post-condition evaluator (`expect`).                        |
-| `classify.ts`        | Static command classification (blast radius + mutations).   |
+| `classify.ts`        | Static command classification (blast radius + mutations); top-level pipeline/list decomposed per-segment, worst case aggregated. |
 | `policy.ts`          | Real sandbox enforcement (macOS sandbox-exec SBPL; Linux bubblewrap). |
 | `trace.ts`           | Structured syscall/FS trace (Linux strace) + read/write summarizer. |
 | `snapshot.ts`        | Checkpoint/restore — APFS CoW clone (`cp -c`) or rsync mirror; origin-dir guard. |
 | `tools/sh_run.ts`    | Compose exec+effects+render+store+assert+retry.             |
 | `tools/sh_detail.ts` | Pull stored slices by id.                                   |
-| `tools/sh_plan.ts`   | Dry-run via `classify`, no execution.                       |
+| `tools/sh_plan.ts`   | Static safety pre-check via `classify`, no execution.       |
 | `tools/sh_snapshot.ts` | `sh_checkpoint` / `sh_restore` / `sh_checkpoints`.        |
-| `server.ts`/`index.ts` | Build + boot over stdio.                                  |
+| `server.ts`/`index.ts` | Build + boot over stdio; `index.ts` also dispatches `veil init`. |
 
 ## Feature → module map
 
@@ -58,12 +59,13 @@ evaluate `assert`, and store the record for `sh_detail`.
 | **I** token-aware output        | done   | `render.ts`, `tools/sh_run.ts` |
 | output honesty (signal/trunc/binary) | done | `signals.ts`, `render.ts`, `exec.ts`, `tools/sh_run.ts` |
 | **J** addressable output        | done   | `store.ts`, `tools/sh_detail.ts` |
+| **J+** disk-backed store (restart-safe, TTL) | done | `store.ts` (per-project dir, atomic ids, best-effort) |
+| zero-friction setup (`veil init`) | done | `init.ts` + `index.ts` |
 | **H** effect diff               | done   | `effects.ts`                   |
 | timeout + output cap (safety)   | done   | `exec.ts`, `config.ts`         |
 | **G** inline assertions         | done   | `assert.ts` + `sh_run` `expect` |
 | **M** declarative retry/timeout | done   | `exec.ts` `runWithRetry` + `sh_run` |
-| **B** dry-run (known commands)  | done   | `classify.ts` + `tools/sh_plan.ts` |
-| **K-lite** blast-radius class.  | done   | `classify.ts` + `tools/sh_plan.ts` |
+| **B / K-lite** static safety pre-check + blast-radius (segment-aware; not an execution dry-run) | done | `classify.ts` (`splitSegments`/`aggregate`/`classifyAtom`) + `tools/sh_plan.ts` |
 | **C** checkpoint / rollback     | done   | `snapshot.ts` (APFS clone / rsync fallback) + `tools/sh_snapshot.ts` |
 | **K** sandbox enforcement       | done (macOS) | `policy.ts` (sandbox-exec SBPL) + `sh_run` `sandbox` |
 | **C+** atomic CoW checkpoints   | done (macOS) | `snapshot.ts` APFS `clonefile` (`cp -c`) + rsync fallback |

@@ -9,17 +9,17 @@
 the operator is an **LLM agent** (Claude Code), not a human at a terminal.
 
 A terminal dumps everything into the scrollback and the agent swallows it all —
-burning context and regex-ing fragile text. **veil** keeps the bulk behind a veil and
-lifts it on demand: effects come back as data, detail is addressable and pulled only
-when needed.
+regex-ing fragile text, round-tripping for state, with no undo. **veil** turns that
+into structured data: effects come back typed, detail is addressable and pulled only
+when needed, and risky commands get a real safety net.
 
 > **quiet-by-default · addressable · lazy-detail · structured-replaces-text**
 
-- **Success = one line.** `{ id: "cmd3", exit: 0, ok: true, ms: 412, files_changed: ["M src/x.ts"] }`
-- **Failure expands** — stderr surfaces where it matters; a hint points at the detail.
-- **Detail is stored, not re-emitted.** Pull `sh_detail id=cmd3 selector=stdout` only if needed.
 - **Effects are data.** Files changed via git porcelain (or a syscall trace), not a `git status` round-trip.
-- **Economy never costs quality.** Condensing hides bulk, never signal (see [Output honesty](#output-honesty)).
+- **Verify in one call.** `expect: { exit: 0, file_exists: "dist/index.js" }` — no follow-up `ls`/`grep`.
+- **Safety net.** `sh_checkpoint`/`sh_restore` (CoW snapshot) and an opt-in kernel `sandbox` for risky commands.
+- **Detail is stored, not re-emitted.** Pull `sh_detail id=cmd3 selector=stdout` only if needed — and it **survives a server restart** (disk-backed).
+- **Token economy is the consequence, not the bet.** Quiet output is a side effect of returning structure; the structure and safety stay valuable even as context windows grow. Condensing hides bulk, never signal (see [Output honesty](#output-honesty)).
 
 ## Why an MCP server, not a forked shell
 
@@ -37,14 +37,18 @@ Fastest path — no clone, no build (runs from GitHub via `npx`):
 
 ```bash
 claude mcp add veil -- npx -y github:vkmtx/veil-mcp
+npx -y github:vkmtx/veil-mcp init     # drop the agent nudge into this project's CLAUDE.md
 ```
 
-Once published to npm this becomes `npx -y veil-mcp`. For other MCP-speaking agents
-(Cursor, Windsurf, Zed, …), add to the MCP server config:
+Once published to npm these become `npx -y veil-mcp` / `npx -y veil-mcp init`. For
+other MCP-speaking agents (Cursor, Windsurf, Zed, …), add to the MCP server config:
 
 ```jsonc
 { "mcpServers": { "veil": { "command": "npx", "args": ["-y", "github:vkmtx/veil-mcp"] } } }
 ```
+
+`veil init` is the zero-friction setup step: it writes (idempotently) the block that
+tells the agent to prefer `sh_run`. See [Adoption](#adoption) for why that step exists.
 
 ### From source
 
@@ -64,8 +68,8 @@ commands. To *enforce* it, see [the guard hook](#optional-enforce-with-a-hook).
 | Tool | Purpose |
 |------|---------|
 | `sh_run` | Execute a command → quiet structured result (exit, duration, files changed, token-aware stdout/stderr). Options below. |
-| `sh_detail` | Pull full stored `stdout`/`stderr`/`meta`/`trace` for a previous run by id — no re-run. `match=<regex>` greps the stored stream (matching lines + numbers) to find a value condensing hid, without dumping it all. |
-| `sh_plan` | Dry-run: statically predict a command's blast-radius category (read-only / mutating / destructive / network / complex / unknown), reversibility, and file effects — **without executing**. |
+| `sh_detail` | Pull full stored `stdout`/`stderr`/`meta`/`trace` for a previous run by id — no re-run. Records are **disk-backed**, so this works even after the server restarts. `match=<regex>` greps the stored stream (matching lines + numbers) to find a value condensing hid, without dumping it all. |
+| `sh_plan` | **Static safety pre-check** (not an execution dry-run): predicts a command's blast-radius category (read-only / mutating / destructive / network / complex / unknown), reversibility, and file effects **without executing**. A top-level pipeline/list (`a && b`, `c \| d`) is decomposed and classified per-segment, worst case wins; substitution/redirect/glob are undecidable and stay `complex`. Errors bias toward over-flagging, never under. |
 | `sh_checkpoint` | Snapshot a directory under a label (rollback point). APFS copy-on-write clone when possible, else rsync mirror. |
 | `sh_restore` | Restore a directory from a checkpoint (undo); refuses a target dir different from where the checkpoint was taken. |
 | `sh_checkpoints` | List checkpoint labels. |
@@ -126,6 +130,24 @@ sh_restore   { "label": "pre-refactor" }     // undo everything
 sh_detail { "id": "cmd9", "selector": "stdout", "match": "ERROR|version=" }
 ```
 
+## Adoption
+
+veil is **opt-in and complementary** to Bash, not a drop-in replacement. Its value
+only lands when the agent actually reaches for `sh_run` on effect-bearing or verbose
+commands — and an agent left to its own judgment will often default to raw Bash. Two
+levers close that gap, in increasing strength:
+
+1. **The nudge** — a short block in the project's `CLAUDE.md` telling the agent to
+   prefer `sh_run`. `veil init` writes it for you (idempotent). Soft, zero-friction.
+2. **The guard hook** — [`hooks/veil-guard.sh`](#optional-enforce-with-a-hook) hard-blocks
+   *verbose*/*dangerous* Bash and steers it to `sh_run`, while explicitly letting
+   interactive/long-running/background commands through. Stronger, opt-in per machine.
+
+Honest limit: there is no native integration, so adoption depends on one of the above
+being configured. `veil init` reduces that to a single command; it does not remove the
+step. If you only want the tools available without changing agent behavior, skip both —
+`sh_run` is still callable directly.
+
 ## Configuration
 
 All tunables are env-overridable (no rebuild):
@@ -140,6 +162,8 @@ All tunables are env-overridable (no rebuild):
 | `VEIL_TIMEOUT_MS` | 120000 | default per-command timeout (0 = none) |
 | `VEIL_MAX_STREAM_BYTES` | 5000000 | max bytes stored per stream (older dropped) |
 | `VEIL_MAX_RECORDS` | 500 | max addressable run records (oldest evicted) |
+| `VEIL_STATE_DIR` | auto | on-disk record store base (auto: `$XDG_STATE_HOME/veil` → `~/.local/state/veil` → `$TMPDIR/veil`). `none`/`off` = memory-only |
+| `VEIL_RECORD_TTL_MS` | 86400000 | persisted records older than this are pruned on boot (0 = keep) |
 | `VEIL_EFFECTS` | true | compute the git effect-diff (set `0` to skip in huge repos) |
 
 ## Optional: enforce with a hook
@@ -176,6 +200,14 @@ For a single risky command, opt into real kernel confinement with `sandbox`
 temp, network optionally denied. Off by default; when requested where unavailable
 the call **refuses** rather than running unconfined.
 
+**Portability is honest, not universal.** The sandbox is an opt-in best-effort layer,
+not a headline guarantee: macOS is solid; Linux bubblewrap is experimental and needs
+unprivileged user namespaces; **containers** (Docker, Codespaces, many CI runners) and
+Ubuntu 24.04+ often restrict those, so `sandbox` self-tests at startup and reports
+unavailable there — by design, so it refuses rather than pretends. The default,
+non-sandboxed path works everywhere. (A namespace-free Linux backend via Landlock is
+on the roadmap to cover the container case.)
+
 ## Roadmap
 
 | | Feature | Status |
@@ -185,31 +217,36 @@ the call **refuses** rather than running unconfined.
 | **H** | effect diff (git porcelain / trace-derived) | ✅ done |
 | **G** | inline assertions (`expect`) | ✅ done |
 | **M** | declarative retry/timeout | ✅ done |
-| **B** | dry-run / blast-radius (`sh_plan`) | ✅ done |
-| **K-lite** | static classification | ✅ done |
+| **B / K-lite** | static safety pre-check + classification (`sh_plan`) — segment-aware, *not* an execution dry-run | ✅ done |
 | **C** | checkpoint / rollback | ✅ done |
 | **K** | real sandbox (macOS `sandbox-exec`) | ✅ done |
 | **C+** | atomic CoW checkpoints (APFS `clonefile`) | ✅ done |
-| **K+** | Linux sandbox (bubblewrap) | 🧪 experimental — write-confine validated on Linux CI (needs unprivileged user namespaces; Ubuntu 24.04+ restricts them by default, so `sandbox` reports unavailable there unless relaxed) |
+| **J+** | disk-backed record store (`sh_detail` survives restart, TTL-pruned) | ✅ done (v0.4) |
+| — | `veil init` zero-friction project setup | ✅ done (v0.4) |
+| **K+** | Linux sandbox (bubblewrap) | 🧪 experimental — write-confine validated on Linux CI (needs unprivileged user namespaces; Ubuntu 24.04+ / containers restrict them, so `sandbox` reports unavailable there unless relaxed) |
 | **A** | structured trace (Linux `strace`) | 🧪 experimental — capture validated on Linux CI |
-| — | persistent FS-watcher effects (no git) | 🔭 planned |
-| — | streaming / PTY (interactive, live output) | 🔭 planned |
+| **K++** | namespace-free Linux sandbox (Landlock) — covers containers/Codespaces where bwrap can't | 🔭 planned |
+| — | streaming / PTY + background jobs (`sh_logs`/`sh_stop`) | 🔭 planned |
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [ARCHITECTURE.md](ARCHITECTURE.md)
 for the module/feature map.
 
-## Testing
+## Testing — verify it yourself
+
+Don't take the numbers on trust — reproduce them. Everything runs locally, no account:
 
 ```bash
+git clone https://github.com/vkmtx/veil-mcp && cd veil-mcp && npm install
 npm run typecheck    # tsc --noEmit
-npm test             # end-to-end smoke (150 assertions over a live stdio server)
+npm test             # end-to-end smoke (187 assertions over a live stdio server)
 npm run backtest     # token-savings regression (weighted net must stay > floor)
 npm run bench        # detailed 5-dimension benchmark (economy, latency, per-feature, condense, session)
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on macOS
 **and** Linux (with bubblewrap + strace installed), so the Linux-only sandbox (K+)
-and trace (A) paths are exercised where this dev machine (macOS) can't.
+and trace (A) paths are exercised where this dev machine (macOS) can't. The badge at
+the top reflects the latest run; the claims here are whatever that pipeline asserts.
 
 ## License
 
@@ -217,6 +254,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Status
 
-v0.3 — experimental. Features I, J, H, G, M, B, K-lite, C, **K**, **C+** built and
-tested (150 smoke assertions + backtest, all green on macOS); **K+** and **A**
-structured and validated on Linux CI.
+v0.4 — experimental. Features I, J, H, G, M, B, K-lite, C, **K**, **C+**, plus v0.4's
+**disk-backed store** and **`veil init`**, built and tested (187 smoke assertions +
+backtest, all green on macOS); **K+** and **A** structured and validated on Linux CI.
+A young, single-author project — judge it by the reproducible suite above, not its age.

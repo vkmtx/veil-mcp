@@ -5,16 +5,22 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
 import { extractSignals } from "../src/signals.js";
 import { diffStatus, effectsFromTrace } from "../src/effects.js";
 import { sandboxAvailable, buildProfile, buildBwrapArgs } from "../src/policy.js";
-import { looksInteractive } from "../src/classify.js";
+import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
+import { runInit } from "../src/init.js";
 import { config } from "../src/config.js";
+
+// Isolate the on-disk record store for the whole test: child servers inherit this
+// env, so they never touch the real ~/.local/state/veil. Cleaned up at exit.
+const STATE_BASE = mkdtempSync(join(tmpdir(), "veil-smoke-state-"));
+process.env.VEIL_STATE_DIR = STATE_BASE;
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -68,6 +74,58 @@ check("summarizeTrace catches unfinished write line", trUnfin.wrote.includes("/t
 // effects-from-trace: cwd-scoped writes become files_changed (replaces git when tracing).
 const fxTrace = effectsFromTrace(["/work/a.txt", "/work/sub/b.txt", "/etc/passwd", "/work/a.txt"], "/work");
 check("effectsFromTrace scopes to cwd, relativizes, dedupes", fxTrace.includes("wrote a.txt") && fxTrace.includes("wrote sub/b.txt") && !fxTrace.some((l) => l.includes("passwd")) && fxTrace.length === 2);
+
+// ── classify: top-level pipeline/list decomposition (mitigation #2) ─────────────
+// A pipeline of read-onlys is read-only — no longer an opaque "complex".
+check("classify pipeline of read-onlys is read-only", classify("cat f | grep x | wc -l").category === "read-only");
+// Worst-case wins the label: cd (unknown) + cp (mutating) → mutating.
+check("classify list aggregates to worst-case (mutating)", classify("cd build && cp a b").category === "mutating");
+// Destructiveness is caught at the SEGMENT level, even without a force flag.
+check("classify segment-level rm is destructive", classify("echo go && rm file").category === "destructive");
+check("classify rm -rf inside a list is destructive", classify("cd x && rm -rf dist").category === "destructive");
+// Genuinely undecidable constructs stay honestly "complex".
+check("classify command substitution stays complex", classify("echo $(whoami)").category === "complex");
+check("classify redirect stays complex (honest limit)", classify("echo hi > out.txt").category === "complex");
+// A quoted operator must NOT be treated as a split point.
+check("classify ignores operators inside quotes", classify('echo "a && b"').category === "read-only");
+// Single commands are unchanged by the new path.
+check("classify single command unchanged", classify("ls -la").category === "read-only" && classify("rm file").category === "destructive");
+// find's blast radius is its ACTION, not the binary — never under-flag an -exec payload (review #1).
+check("classify find -exec shred destructive", classify("find . -type f -exec shred {} \\;").category === "destructive");
+check("classify find -execdir rm destructive", classify("find . -execdir rm {} +").category === "destructive");
+check("classify find -exec /bin/rm destructive", classify("find . -exec /bin/rm {} \\;").category === "destructive");
+check("classify find -exec git reset --hard destructive", classify("find . -type d -exec git reset --hard \\;").category === "destructive");
+check("classify find -exec cat stays read-only (no over-flag)", classify("find . -exec cat {} \\;").category === "read-only");
+check("classify plain find stays read-only", classify("find . -name '*.ts'").category === "read-only");
+// quoted git subcommand must classify like the bare form (review #2).
+check("classify quoted git reset --hard destructive", classify('git "reset" --hard').category === "destructive");
+check("classify quoted git clean -fd destructive", classify("git 'clean' -fd").category === "destructive");
+check("classify quoted git push --force destructive", classify('git "push" --force').category === "destructive");
+
+// ── veil init: idempotent per-project nudge (mitigation #1) ─────────────────────
+const initDir = mkdtempSync(join(tmpdir(), "veil-init-"));
+runInit(initDir);
+const initFile = join(initDir, "CLAUDE.md");
+check("veil init creates CLAUDE.md with the sh_run nudge", existsSync(initFile) && readFileSync(initFile, "utf8").includes("sh_run"));
+const afterFirst = readFileSync(initFile, "utf8");
+runInit(initDir); // second run must not duplicate the block
+const afterSecond = readFileSync(initFile, "utf8");
+check("veil init is idempotent (one marked block, byte-stable)", (afterSecond.match(/veil-mcp:start/g) || []).length === 1 && afterSecond === afterFirst);
+// Appends (does not clobber) an existing CLAUDE.md.
+const initDir2 = mkdtempSync(join(tmpdir(), "veil-init2-"));
+writeFileSync(join(initDir2, "CLAUDE.md"), "# Existing project rules\n\nKeep me.\n");
+runInit(initDir2);
+const merged = readFileSync(join(initDir2, "CLAUDE.md"), "utf8");
+check("veil init preserves an existing CLAUDE.md", merged.includes("Keep me.") && merged.includes("veil-mcp:start"));
+// An orphan start marker (truncated/hand-edited block) must still get a working block (review #9).
+const initDir3 = mkdtempSync(join(tmpdir(), "veil-init3-"));
+writeFileSync(join(initDir3, "CLAUDE.md"), "# rules\n<!-- veil-mcp:start -->\norphan, no end marker\n# more\n");
+runInit(initDir3);
+const repaired = readFileSync(join(initDir3, "CLAUDE.md"), "utf8");
+check("veil init repairs an orphan start marker (appends a complete block)", repaired.includes("<!-- veil-mcp:end -->") && repaired.includes("sh_run"));
+rmSync(initDir, { recursive: true, force: true });
+rmSync(initDir2, { recursive: true, force: true });
+rmSync(initDir3, { recursive: true, force: true });
 const prof = buildProfile("/tmp/xcwd", {});
 check("profile confines writes and re-allows cwd", prof.includes("(deny file-write*)") && prof.includes("/tmp/xcwd"));
 check("profile denies network only when asked", buildProfile("/tmp/x", { network: false }).includes("(deny network*)") && !buildProfile("/tmp/x", {}).includes("(deny network*)"));
@@ -488,8 +546,9 @@ const binMeta = JSON.parse(text(await truncClient.callTool({ name: "sh_detail", 
 check("meta mirrors stdout_binary", binMeta.stdout_binary === true);
 await truncClient.close();
 
-// ── 24) store eviction at capacity — fresh server, VEIL_MAX_RECORDS=3 ──
-const evT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_MAX_RECORDS: "3" } });
+// ── 24) store eviction at capacity — fresh server, VEIL_MAX_RECORDS=3, isolated dir ──
+const evDir = mkdtempSync(join(tmpdir(), "veil-evict-"));
+const evT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_MAX_RECORDS: "3", VEIL_STATE_DIR: evDir } });
 const evC = new Client({ name: "smoke-evict", version: "0.0.0" });
 await evC.connect(evT);
 let firstId = "";
@@ -504,6 +563,26 @@ check("oldest record evicted at capacity", typeof evicted.error === "string" && 
 const kept = text(await evC.callTool({ name: "sh_detail", arguments: { id: lastId, selector: "stdout" } }));
 check("newest record still addressable", kept.includes("run3"));
 await evC.close();
+rmSync(evDir, { recursive: true, force: true });
+
+// ── 24b) record store survives a server restart — disk-backed (mitigation #6) ──
+const persistDir = mkdtempSync(join(tmpdir(), "veil-persist-"));
+const persistEnv = { ...process.env, VEIL_STATE_DIR: persistDir };
+const psT1 = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: persistEnv });
+const psC1 = new Client({ name: "smoke-persist1", version: "0.0.0" });
+await psC1.connect(psT1);
+const ps1 = JSON.parse(text(await psC1.callTool({ name: "sh_run", arguments: { command: "echo PERSIST_ME" } })));
+await psC1.close(); // first server process exits — memory is gone, disk remains
+// Fresh server, SAME state dir + cwd → must recover the earlier run.
+const psT2 = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: persistEnv });
+const psC2 = new Client({ name: "smoke-persist2", version: "0.0.0" });
+await psC2.connect(psT2);
+const recovered = text(await psC2.callTool({ name: "sh_detail", arguments: { id: ps1.id, selector: "stdout" } }));
+check("sh_detail recovers a run after a server restart (disk-backed store)", recovered.includes("PERSIST_ME"));
+const ps2 = JSON.parse(text(await psC2.callTool({ name: "sh_run", arguments: { command: "echo SECOND" } })));
+check("restarted server continues ids past the recovered counter (no collision)", Number(ps2.id.slice(3)) > Number(ps1.id.slice(3)));
+await psC2.close();
+rmSync(persistDir, { recursive: true, force: true });
 
 // ── 25) VEIL_EFFECTS=0 disables the effect-diff, but a `changed` assert still forces it (mitigation D) ──
 const noFxT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_EFFECTS: "0" } });
@@ -520,5 +599,6 @@ check("changed assertion still forces effect-diff when effects off", noFxForced.
 rmSync(fxRepo, { recursive: true, force: true });
 await noFxC.close();
 
+rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

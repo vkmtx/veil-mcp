@@ -13,9 +13,11 @@ When this MCP server (`veil`) is connected, prefer its tools over raw Bash:
   - Add **`trace: true`** to capture which files it read/wrote (Linux).
 - **`sh_detail id=<id> selector=stdout`** to recover lines a condensed result hid —
   never re-run a command just to see its output again. Use **`match=<regex>`** to
-  grep the stored output for a specific value without dumping it all.
-- **`sh_plan`** before any destructive or unfamiliar command, to see its predicted
-  blast radius without executing it.
+  grep the stored output for a specific value without dumping it all. (Records are
+  disk-backed, so this works even across a server restart.)
+- **`sh_plan`** before any destructive or unfamiliar command, for a static safety
+  pre-check of its predicted blast radius without executing it (a pipeline/list is
+  classified per-segment, worst case wins; it is not a full execution dry-run).
 - **`sh_checkpoint`** before a risky or irreversible change; **`sh_restore`** to
   roll back if it goes wrong.
 
