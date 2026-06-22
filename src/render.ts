@@ -3,6 +3,10 @@
 import { config } from "./config.js";
 import { extractSignals } from "./signals.js";
 
+/** Max signal lines surfaced inline in the elision marker; any beyond this are
+ *  counted in the marker ("+N more") and remain retrievable via sh_detail. */
+const SIGNAL_SHOW = 5;
+
 /**
  * Collapse carriage-return progress frames (`a\rb\rc` with no LF → last frame)
  * and treat a lone `\r` as a separator, while leaving real CRLF intact (the
@@ -77,10 +81,15 @@ export function condense(
   // can't hide a mid-stream FAIL/warning. Scans only the hidden region, and excludes
   // anything already visible in head/tail so nothing is rendered twice.
   const shown = new Set([...head, ...tail].map((l) => l.trim()));
-  const flagged = extractSignals(lines.slice(headLines, lines.length - tailLines), headLines, 5, shown);
+  // extractSignals scans the WHOLE hidden region. Show up to SIGNAL_SHOW inline but
+  // report the TRUE total with an overflow note, so a 6th+ distinct mid-stream
+  // signal is never dropped from the count — the rest stay retrievable via sh_detail.
+  const allFlagged = extractSignals(lines.slice(headLines, lines.length - tailLines), headLines, shown);
+  const flagged = allFlagged.slice(0, SIGNAL_SHOW);
+  const more = allFlagged.length - flagged.length;
   const marker =
-    flagged.length > 0
-      ? `… [${hidden} lines hidden, ${flagged.length} flagged — pull with sh_detail id=${id} selector=${selector}] …`
+    allFlagged.length > 0
+      ? `… [${hidden} lines hidden, ${allFlagged.length} flagged${more > 0 ? ` (showing ${flagged.length}, +${more} more via sh_detail)` : ""} — pull with sh_detail id=${id} selector=${selector}] …`
       : `… [${hidden} lines hidden — pull with sh_detail id=${id} selector=${selector}] …`;
   return [...prefix, ...head, marker, ...flagged, ...tail].join("\n");
 }
