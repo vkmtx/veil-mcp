@@ -1,0 +1,64 @@
+{
+  "name": "veil-mcp",
+  "version": "0.3.0",
+  "description": "Agent-native shell as an MCP server — quiet-by-default, addressable detail, effects-as-data, opt-in sandbox/trace. Built for LLM agents (Claude Code), not humans at a terminal.",
+  "type": "module",
+  "bin": {
+    "veil-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "hooks",
+    "README.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx test/smoke.ts",
+    "backtest": "tsx test/backtest.ts",
+    "stress": "tsx test/stress.ts",
+    "bench": "tsx bench/bench.ts",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "shell",
+    "agent",
+    "llm",
+    "claude",
+    "claude-code",
+    "ai-agent",
+    "terminal",
+    "sandbox",
+    "developer-tools"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vkmtx/veil-mcp.git"
+  },
+  "homepage": "https://github.com/vkmtx/veil-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/vkmtx/veil-mcp/issues"
+  },
+  "author": "vkmtx",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0"
+  }
+}
