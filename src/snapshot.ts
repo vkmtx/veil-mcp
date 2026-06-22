@@ -14,7 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 const STORE = join(tmpdir(), "veil-checkpoints");
 // Origin sidecars live in a SEPARATE tree, not inside STORE — so they never
@@ -25,14 +25,37 @@ const EXCLUDES = ["--exclude", ".git", "--exclude", "node_modules"];
 
 /** Sidecar recording the dir a checkpoint was taken from. */
 function dirSidecar(label: string): string {
-  return join(META, label);
+  return containedPath(META, label);
 }
 
 function safeLabel(label: string): string {
   if (!/^[A-Za-z0-9._-]+$/.test(label)) {
     throw new Error(`invalid checkpoint label: ${JSON.stringify(label)} (use [A-Za-z0-9._-])`);
   }
+  // The charset above still admits the path-segment specials "." and ".." — a
+  // bare ".." makes join(STORE, label) resolve to STORE's PARENT (the temp dir
+  // itself), and the rmSync in checkpoint() would then recurse into it. Reject
+  // them explicitly; multi-dot names like "..." are harmless literal dirs.
+  if (label === "." || label === "..") {
+    throw new Error(`invalid checkpoint label: ${JSON.stringify(label)} (reserved path segment)`);
+  }
   return label;
+}
+
+/**
+ * Resolve `label` under `base`, asserting the result stays strictly inside
+ * `base`. Defense-in-depth: even if safeLabel is later loosened, no checkpoint
+ * operation can ever touch a path outside its store. Used at every site that
+ * joins an untrusted label onto STORE/META before an rmSync/rsync.
+ */
+function containedPath(base: string, label: string): string {
+  safeLabel(label);
+  const root = resolve(base);
+  const p = resolve(base, label);
+  if (!p.startsWith(root + sep)) {
+    throw new Error(`checkpoint label escapes store: ${JSON.stringify(label)}`);
+  }
+  return p;
 }
 
 function ensureRsync(): void {
@@ -76,9 +99,8 @@ function tryClone(dir: string, dest: string): boolean {
 /** Snapshot `dir` under the given label. Overwrites an existing checkpoint of that label. */
 export function checkpoint(label: string, dir: string): CheckpointInfo {
   ensureRsync();
-  safeLabel(label);
+  const dest = containedPath(STORE, label);
   if (!existsSync(dir)) throw new Error(`dir does not exist: ${dir}`);
-  const dest = join(STORE, label);
   mkdirSync(STORE, { recursive: true });
   rmSync(dest, { recursive: true, force: true }); // fresh snapshot each time
 
@@ -100,8 +122,7 @@ export function checkpoint(label: string, dir: string): CheckpointInfo {
 /** Restore `dir` from a checkpoint, mirroring (files created since are removed). */
 export function restore(label: string, dir: string): CheckpointInfo {
   ensureRsync();
-  safeLabel(label);
-  const src = join(STORE, label);
+  const src = containedPath(STORE, label);
   if (!existsSync(src)) throw new Error(`no checkpoint named ${label}`);
   // restore uses `rsync --delete`: pointing it at the WRONG dir would wipe that
   // dir down to the snapshot. Refuse unless the target matches where the
@@ -128,8 +149,7 @@ export function list(): string[] {
 
 /** Delete a checkpoint and its sidecar. */
 export function drop(label: string): void {
-  safeLabel(label);
-  const p = join(STORE, label);
+  const p = containedPath(STORE, label);
   if (existsSync(p)) rmSync(p, { recursive: true, force: true });
   const sidecar = dirSidecar(label);
   if (existsSync(sidecar)) rmSync(sidecar, { force: true });

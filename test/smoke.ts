@@ -454,6 +454,17 @@ const snapA = mkdtempSync(join(tmpdir(), "veil-snapA-"));
 const snapB = mkdtempSync(join(tmpdir(), "veil-snapB-"));
 const badLabel = JSON.parse(text(await client.callTool({ name: "sh_checkpoint", arguments: { label: "../escape", dir: snapA } })));
 check("checkpoint rejects traversal label", typeof badLabel.error === "string" && badLabel.error.includes("invalid checkpoint label"));
+// bare ".."/"." must be rejected BEFORE the "fresh snapshot" rmSync: dest=join(STORE,"..")
+// resolves to the temp root, which would otherwise be recursively force-deleted.
+for (const lbl of ["..", "."]) {
+  const before = existsSync(tmpdir());
+  const esc = JSON.parse(text(await client.callTool({ name: "sh_checkpoint", arguments: { label: lbl, dir: snapA } })));
+  check(`checkpoint rejects ${JSON.stringify(lbl)} label`, typeof esc.error === "string" && (esc.error.includes("invalid checkpoint label") || esc.error.includes("escapes store")));
+  check(`checkpoint ${JSON.stringify(lbl)} does not wipe tmpdir`, before && existsSync(tmpdir()));
+}
+// a multi-dot label is a harmless literal dir name — must still be accepted.
+const okMulti = JSON.parse(text(await client.callTool({ name: "sh_checkpoint", arguments: { label: "ok...dir-1", dir: snapA } })));
+check("checkpoint accepts multi-dot label", okMulti.checkpointed === "ok...dir-1");
 const missRestore = JSON.parse(text(await client.callTool({ name: "sh_restore", arguments: { label: "never-made-xyz", dir: snapA } })));
 check("restore unknown label errors", typeof missRestore.error === "string" && missRestore.error.includes("no checkpoint named"));
 const missDir = JSON.parse(text(await client.callTool({ name: "sh_checkpoint", arguments: { label: "okdir", dir: "/no/such/dir/zzz" } })));
