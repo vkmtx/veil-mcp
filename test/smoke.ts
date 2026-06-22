@@ -97,6 +97,19 @@ check("classify find -exec /bin/rm destructive", classify("find . -exec /bin/rm 
 check("classify find -exec git reset --hard destructive", classify("find . -type d -exec git reset --hard \\;").category === "destructive");
 check("classify find -exec cat stays read-only (no over-flag)", classify("find . -exec cat {} \\;").category === "read-only");
 check("classify plain find stays read-only", classify("find . -name '*.ts'").category === "read-only");
+// git clean force-delete is DESTRUCTIVE whether force is a bundled short cluster
+// or the long --force (the latter previously misread as read-only).
+check("classify git clean --force destructive", classify("git clean --force").category === "destructive");
+check("classify git clean -d --force destructive", classify("git clean -d --force").category === "destructive");
+check("classify git clean -fdx destructive", classify("git clean -fdx").category === "destructive");
+check("classify git clean -n stays read-only (dry-run)", classify("git clean -n").category === "read-only");
+// A glob/redirect/$() must never DOWNGRADE a known-destructive verb to "complex"
+// (rank 0): the atom classifier re-runs on the whole unanalyzable command.
+check("classify rm glob not downgraded", classify("rm *").category === "destructive");
+check("classify shred with redirect destructive", classify("shred -u f > /dev/null").category === "destructive");
+check("classify git reset --hard via $() destructive", classify("git reset --hard $(git rev-parse HEAD~3)").category === "destructive");
+// ...but a NON-destructive command with a glob stays honestly complex (no over-flag).
+check("classify grep glob stays complex", classify("grep x *.log").category === "complex");
 // quoted git subcommand must classify like the bare form (review #2).
 check("classify quoted git reset --hard destructive", classify('git "reset" --hard').category === "destructive");
 check("classify quoted git clean -fd destructive", classify("git 'clean' -fd").category === "destructive");

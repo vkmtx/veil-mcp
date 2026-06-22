@@ -188,7 +188,11 @@ function classifyGit(toks: string[]): Classification {
     return hard ? D("reset --hard discards working-tree and staged changes") : M("moves HEAD/index");
   }
   if (sub === "clean") {
-    return has(/\s-[a-z]*f/i) ? D("deletes untracked files, irreversible") : R(); // clean only acts with -f
+    // Force can be a bundled short cluster (-f / -fd / -fdx / -df) OR the long
+    // --force — the sibling subcommands accept both, and clean must too. Missing
+    // --force here made `git clean --force` read as read-only: no effect-tracking,
+    // no destructive nudge, while it irreversibly deletes every untracked file.
+    return has(/\s(--force|-[a-z]*f[a-z]*)\b/i) ? D("deletes untracked files, irreversible") : R();
   }
   if (sub === "checkout" || sub === "restore" || sub === "switch") {
     // Discarding worktree changes (path checkout, --worktree, --force) is data loss.
@@ -370,6 +374,18 @@ export function classify(command: string): Classification {
   const segs = splitSegments(cmd);
   if (segs) {
     return segs.length > 1 ? aggregate(segs.map((s) => classifyAtom(s))) : classifyAtom(segs[0] ?? cmd);
+  }
+
+  // splitSegments bailed on an undecidable construct (substitution / redirect /
+  // glob / subshell / background). Demoting straight to "complex" (RANK 0) would
+  // HIDE a destructive verb that only the atom/git classifier detects — e.g.
+  // `rm *`, `shred f > /dev/null`, `git reset --hard $(…)` — sinking it below
+  // read-only and skipping the destructive nudge. Re-run the atom classifier on
+  // the whole command and keep it only when it surfaces a high-blast category;
+  // otherwise the command really is unanalyzable → honest "complex".
+  const whole = classifyAtom(cmd);
+  if (whole.category === "destructive" || whole.category === "network") {
+    return { ...whole, note: `${whole.note ?? whole.category} (within an otherwise unanalyzable command)` };
   }
 
   return {
