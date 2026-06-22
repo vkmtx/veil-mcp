@@ -8,6 +8,11 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+    ignore:
+      # TypeScript 6 is a breaking major (changes node type resolution); adopt it in a
+      # dedicated migration PR, not an automated bump. Minor/patch updates still flow.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
