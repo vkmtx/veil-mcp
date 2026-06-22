@@ -250,6 +250,17 @@ CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on ma
 and trace (A) paths are exercised where this dev machine (macOS) can't. The badge at
 the top reflects the latest run; the claims here are whatever that pipeline asserts.
 
+## Community
+
+Contributions, questions, and ideas are welcome — this is an early project and a good
+time to shape it.
+
+- 💬 **[Discussions](https://github.com/vkmtx/veil-mcp/discussions)** — questions, ideas, show-and-tell.
+- 🐛 **[Issues](https://github.com/vkmtx/veil-mcp/issues)** — bugs and feature requests (templates provided).
+- 🌱 **[Good first issues](https://github.com/vkmtx/veil-mcp/labels/good%20first%20issue)** — scoped entry points for a first PR.
+- 📖 **[CONTRIBUTING.md](CONTRIBUTING.md)** — dev setup and the test gate.
+- 🤝 **[Code of Conduct](CODE_OF_CONDUCT.md)** — be decent.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
