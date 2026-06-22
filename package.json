@@ -26,6 +26,7 @@
     "backtest": "tsx test/backtest.ts",
     "stress": "tsx test/stress.ts",
     "bench": "tsx bench/bench.ts",
+    "metrics": "tsx bench/metrics.ts",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },

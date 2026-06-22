@@ -16,6 +16,7 @@ import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
 import { runInit } from "../src/init.js";
 import { chooseMethod } from "../src/snapshot.js";
+import { TURNS, recallCorpus, recallSurfaced } from "../bench/metrics-data.js";
 import { config } from "../src/config.js";
 
 // Isolate the on-disk record store for the whole test: child servers inherit this
@@ -219,6 +220,12 @@ check("signals ignores a benign line (no over-flag)", extractSignals(["compiling
 const manySignals = Array.from({ length: 60 }, (_, i) => (i >= 25 && i < 33 ? `ERROR case ${i}` : `line ${i}`)).join("\n");
 const manyCondensed = condense(manySignals, "u", "stdout");
 check("condense reports true flagged total beyond the inline cap", manyCondensed.includes("8 flagged") && manyCondensed.includes("+3 more"));
+
+// ── value metrics (deterministic): the published recall + turns-saved numbers ───
+// Same corpus bench/metrics.ts prints, asserted here so the figures can't drift.
+check("signal recall is 100% on the labeled corpus (every buried failure surfaces)", recallCorpus.every((c) => recallSurfaced(c, condense)));
+check("turns-saved: every task needs fewer veil calls than raw", TURNS.every((t) => t.veil < t.raw));
+check("turns-saved: 11 raw -> 5 veil calls across the corpus", TURNS.reduce((a, t) => a + t.raw, 0) === 11 && TURNS.reduce((a, t) => a + t.veil, 0) === 5);
 
 // truncation honesty: marker present, torn first fragment dropped.
 const truncRendered = condense("torn-fragment-line\nreal line A\nreal line B", "u9", "stdout", { truncated: true });
