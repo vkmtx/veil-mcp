@@ -87,7 +87,10 @@ evaluate `assert`, and store the record for `sh_detail`.
 - **Detail is never lost, only deferred.** Condensed views always carry an
   `sh_detail` pointer to the full bytes.
 - **Quiet on success, generous on failure.** Token spend follows where it matters.
-- **Quiet must never mean dishonest.** Condensing may hide bulk but not signal: a
-  mid-stream failure is surfaced, a truncated stream says so (and never labels its
-  tail as the head), line counts are the true emitted count, and binary bytes are
-  preserved (base64) rather than mangled. Economy may not cost decision quality.
+- **Quiet must never mean dishonest.** Condensing hides bulk but works to keep signal:
+  a mid-stream failure is surfaced (a content-aware lexicon covering crash idioms with
+  no error/fail keyword; an overflow note when more signals exist than fit inline), a
+  truncated stream says so (and never labels its tail as the head), line counts are the
+  true emitted count, and binary bytes are preserved (base64) rather than mangled. This
+  is a best-effort heuristic, not a proof — but it is measured (100% recall on a labeled
+  corpus, `npm run metrics`). Economy may not cost decision quality.
