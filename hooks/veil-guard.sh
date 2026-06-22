@@ -28,13 +28,30 @@ print(d.get("tool_input", {}).get("command", ""))' 2>/dev/null) || exit 0
 # No command extracted, or python3 unavailable → fail open.
 [ -n "$CMD" ] || exit 0
 
-# Explicit bypass.
-case "$CMD" in
-  *VEIL_BYPASS=1*) exit 0 ;;
+# Explicit bypass — honored ONLY as a LEADING environment assignment (the
+# documented "prefix the command with VEIL_BYPASS=1" escape hatch). A plain
+# substring match let a trailing comment defeat the guard entirely, e.g.
+# `rm -rf / # VEIL_BYPASS=1` would slip through.
+bypass_head=$(printf '%s' "$CMD" | sed 's/^[[:space:]]*//')
+case "$bypass_head" in
+  VEIL_BYPASS=1|VEIL_BYPASS=1[[:space:]]*) exit 0 ;;
 esac
 
-# Dangerous: recursive/force delete, disk writes. Blocked even if backgrounded.
-if printf '%s' "$CMD" | grep -Eq '\brm[[:space:]]+([^|;&]*[[:space:]])?-[a-z]*[rf]|[[:space:]]>[[:space:]]*/dev/(sd|disk|nvme)|\bdd[[:space:]]|\bmkfs'; then
+# Dangerous: recursive/force delete, content shredding, raw-device / filesystem
+# writes. Each alternative is bounded by [^|;&] so a match can't cross a shell
+# operator into an unrelated command. Blocked even if backgrounded.
+if printf '%s' "$CMD" | grep -Eq \
+  -e '\brm[[:space:]]+([^|;&]*[[:space:]])?-[a-z]*[rf]' \
+  -e '\brm\b[^|;&]*--(recursive|force)\b' \
+  -e '\bgit[[:space:]]+clean\b[^|;&]*[[:space:]](-[a-z]*f|--force)' \
+  -e '\bfind\b[^|;&]*[[:space:]]-delete\b' \
+  -e '\bfind\b[^|;&]*-exec[[:space:]]+rm\b' \
+  -e '\bchmod\b[^|;&]*[[:space:]](-[a-z]*R|--recursive)' \
+  -e '\bshred\b' \
+  -e '\btruncate[[:space:]]' \
+  -e '[[:space:]]>[[:space:]]*/dev/(sd|disk|hd|nvme|vd|mapper)' \
+  -e '\bdd[[:space:]]' \
+  -e '\bmkfs'; then
   echo "veil: dangerous command — use sh_run (optionally sandbox:true / sh_checkpoint first), or prefix VEIL_BYPASS=1 to force Bash." >&2
   exit 2
 fi

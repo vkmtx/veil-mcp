@@ -102,6 +102,34 @@ check("classify quoted git reset --hard destructive", classify('git "reset" --ha
 check("classify quoted git clean -fd destructive", classify("git 'clean' -fd").category === "destructive");
 check("classify quoted git push --force destructive", classify('git "push" --force').category === "destructive");
 
+// ── veil-guard hook: bypass anchoring + danger coverage ─────────────────────────
+const guardPath = new URL("../hooks/veil-guard.sh", import.meta.url).pathname;
+function guardExit(command: string): number {
+  try {
+    execSync(`/bin/sh '${guardPath}'`, { input: JSON.stringify({ tool_name: "Bash", tool_input: { command } }), stdio: ["pipe", "pipe", "pipe"] });
+    return 0;
+  } catch (e: any) {
+    return typeof e.status === "number" ? e.status : -1;
+  }
+}
+// Self-gate: the hook needs an interpreter to parse stdin; without it it fails
+// open (exit 0). Assert blocking only where the hook is functional, so a runner
+// missing /usr/bin/python3 doesn't red the suite.
+if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
+  // A trailing comment must NOT fake a bypass — VEIL_BYPASS is a LEADING env-assign only.
+  check("guard: comment cannot fake VEIL_BYPASS", guardExit("rm -rf / # VEIL_BYPASS=1") === 2);
+  // ...and the real, leading escape hatch still works.
+  check("guard: leading VEIL_BYPASS=1 allows raw Bash", guardExit("VEIL_BYPASS=1 vim x") === 0 && guardExit("VEIL_BYPASS=1 rm -rf /tmp/x") === 0);
+  // Danger forms the old single-regex missed.
+  for (const cmd of ["find . -name x -delete", "git clean -fdx", "git clean --force", "chmod -R 777 /", "shred -u f", "truncate -s 0 db", "rm --recursive --force /data"]) {
+    check(`guard: blocks ${cmd}`, guardExit(cmd) === 2);
+  }
+  // Must NOT over-block benign forms.
+  check("guard: allows non-recursive chmod + git status", guardExit("chmod 755 f") === 0 && guardExit("git status") === 0);
+} else {
+  check("guard: SKIPPED (hook not functional in this environment)", true);
+}
+
 // ── veil init: idempotent per-project nudge (mitigation #1) ─────────────────────
 const initDir = mkdtempSync(join(tmpdir(), "veil-init-"));
 runInit(initDir);
