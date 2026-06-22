@@ -15,6 +15,7 @@ import { sandboxAvailable, buildProfile, buildBwrapArgs } from "../src/policy.js
 import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
 import { runInit } from "../src/init.js";
+import { chooseMethod } from "../src/snapshot.js";
 import { config } from "../src/config.js";
 
 // Isolate the on-disk record store for the whole test: child servers inherit this
@@ -74,6 +75,13 @@ check("summarizeTrace catches unfinished write line", trUnfin.wrote.includes("/t
 // effects-from-trace: cwd-scoped writes become files_changed (replaces git when tracing).
 const fxTrace = effectsFromTrace(["/work/a.txt", "/work/sub/b.txt", "/etc/passwd", "/work/a.txt"], "/work");
 check("effectsFromTrace scopes to cwd, relativizes, dedupes", fxTrace.includes("wrote a.txt") && fxTrace.includes("wrote sub/b.txt") && !fxTrace.some((l) => l.includes("passwd")) && fxTrace.length === 2);
+
+// snapshot method honesty: "clone" (CoW) is claimed ONLY within one volume, so a
+// cross-device cp -cR full-copy is never mislabeled as an instant clone.
+check("snapshot clones only within one volume (darwin, same dev)", chooseMethod("darwin", 42, 42) === "clone");
+check("snapshot cross-volume reports rsync, not a mislabeled clone", chooseMethod("darwin", 42, 43) === "rsync");
+check("snapshot non-darwin always rsync", chooseMethod("linux", 42, 42) === "rsync");
+check("snapshot unstattable source never clones", chooseMethod("darwin", -1, -1) === "rsync");
 
 // ── classify: top-level pipeline/list decomposition (mitigation #2) ─────────────
 // A pipeline of read-onlys is read-only — no longer an opaque "complex".

@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -73,6 +73,24 @@ function tryClone(dir: string, dest: string): boolean {
   }
 }
 
+/** Device id of `p`, or -1 if it can't be stat'd. */
+function devOf(p: string): number {
+  try { return statSync(p).dev; } catch { return -1; }
+}
+
+/**
+ * Decide the snapshot method from volume identity. An APFS clonefile (`cp -c`) is
+ * real copy-on-write ONLY within one volume; across devices `cp -cR` silently
+ * degrades to a full byte copy yet still exits 0 — which would mislabel a slow copy
+ * as an instant "clone". STORE lives under tmpdir() (the macOS system APFS volume),
+ * so a source on the SAME device is on that APFS volume and clones for real, while a
+ * different device (USB, separate partition, RAM disk, non-APFS mount) must use the
+ * rsync mirror and be reported honestly.
+ */
+export function chooseMethod(platform: NodeJS.Platform, srcDev: number, storeDev: number): "clone" | "rsync" {
+  return platform === "darwin" && srcDev >= 0 && srcDev === storeDev ? "clone" : "rsync";
+}
+
 /** Snapshot `dir` under the given label. Overwrites an existing checkpoint of that label. */
 export function checkpoint(label: string, dir: string): CheckpointInfo {
   ensureRsync();
@@ -83,7 +101,10 @@ export function checkpoint(label: string, dir: string): CheckpointInfo {
   rmSync(dest, { recursive: true, force: true }); // fresh snapshot each time
 
   let method: "clone" | "rsync";
-  if (tryClone(dir, dest)) {
+  // Only attempt a CoW clone when the source shares STORE's volume; otherwise cp -cR
+  // would full-copy yet still report "clone". tryClone itself also returns false if
+  // the clonefile fails (e.g. an older HFS+ volume), falling back to the rsync mirror.
+  if (chooseMethod(process.platform, devOf(dir), devOf(STORE)) === "clone" && tryClone(dir, dest)) {
     method = "clone";
   } else {
     mkdirSync(dest, { recursive: true });
