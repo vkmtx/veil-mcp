@@ -23,7 +23,7 @@
 
 import { createHash } from "node:crypto";
 import {
-  mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, renameSync, openSync, closeSync,
+  mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, renameSync, openSync, closeSync, chmodSync,
 } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -59,9 +59,13 @@ function resolveDir(): string | null {
   const proj = `proj-${createHash("sha1").update(process.cwd()).digest("hex").slice(0, 12)}`;
   const d = join(base, proj);
   try {
-    mkdirSync(d, { recursive: true });
+    // Records hold full stdout/stderr (possibly secrets in env-echoing output),
+    // so the project store is OWNER-ONLY. mkdir's mode is umask-masked and skipped
+    // for an already-existing dir, so chmod explicitly to enforce 0700 either way.
+    mkdirSync(d, { recursive: true, mode: 0o700 });
+    try { chmodSync(d, 0o700); } catch { /* not owner / unsupported FS — best-effort */ }
     const probe = join(d, ".w");
-    writeFileSync(probe, "");
+    writeFileSync(probe, "", { mode: 0o600 });
     unlinkSync(probe);
     return d;
   } catch {
@@ -127,7 +131,7 @@ export function nextId(): string {
   if (dir) {
     for (let guard = 0; guard < 100_000; guard++) {
       try {
-        closeSync(openSync(lockPath(`cmd${counter}`), "wx"));
+        closeSync(openSync(lockPath(`cmd${counter}`), "wx", 0o600));
         break;
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code === "EEXIST") {
@@ -148,7 +152,7 @@ export function put(rec: RunRecord): void {
       // Write to a temp file then atomically rename into place, so a concurrent
       // reader never sees a partial/empty record. Then drop the reservation lock.
       const tmp = join(dir, `${rec.id}.json.tmp.${process.pid}`);
-      writeFileSync(tmp, JSON.stringify(rec));
+      writeFileSync(tmp, JSON.stringify(rec), { mode: 0o600 }); // rename preserves mode
       renameSync(tmp, recordPath(rec.id));
       try { unlinkSync(lockPath(rec.id)); } catch { /* no lock (mem-id path) */ }
     } catch {

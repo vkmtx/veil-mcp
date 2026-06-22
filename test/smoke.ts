@@ -5,7 +5,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, statSync, readdirSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
@@ -541,6 +541,15 @@ if (process.platform === "darwin" && sandboxAvailable()) {
 }
 
 await client.close();
+
+// ── 22c) store permissions: persisted records are OWNER-ONLY (no secret leak on
+// a shared host). The main server above wrote records under STATE_BASE/proj-*. ──
+if (process.platform !== "win32") {
+  const projDir = readdirSync(STATE_BASE).filter((f) => f.startsWith("proj-")).map((f) => join(STATE_BASE, f))[0];
+  const recFile = projDir ? readdirSync(projDir).find((f) => /^cmd\d+\.json$/.test(f)) : undefined;
+  check("store dir is owner-only (0700)", projDir !== undefined && (statSync(projDir).mode & 0o777) === 0o700);
+  check("store record is owner-only (0600)", recFile !== undefined && projDir !== undefined && (statSync(join(projDir, recFile)).mode & 0o777) === 0o600);
+}
 
 // ── 23) truncation honesty + binary handling — fresh server, tiny byte cap ──
 const truncTransport = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_MAX_STREAM_BYTES: "2000" } });
