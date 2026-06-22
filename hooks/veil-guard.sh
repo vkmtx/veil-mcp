@@ -38,8 +38,11 @@ case "$bypass_head" in
 esac
 
 # Dangerous: recursive/force delete, content shredding, raw-device / filesystem
-# writes. Each alternative is bounded by [^|;&] so a match can't cross a shell
-# operator into an unrelated command. Blocked even if backgrounded.
+# writes. Verb-led patterns (shred/truncate) are anchored to command position —
+# start of command or just after a shell operator — so the same word as an argument
+# or filename (`cat shred.log`, `psql -c 'truncate table t'`) is NOT mis-blocked;
+# the rest stay operator-bounded so a match can't cross into an unrelated command.
+# Blocked even if backgrounded.
 if printf '%s' "$CMD" | grep -Eq \
   -e '\brm[[:space:]]+([^|;&]*[[:space:]])?-[a-z]*[rf]' \
   -e '\brm\b[^|;&]*--(recursive|force)\b' \
@@ -47,8 +50,8 @@ if printf '%s' "$CMD" | grep -Eq \
   -e '\bfind\b[^|;&]*[[:space:]]-delete\b' \
   -e '\bfind\b[^|;&]*-exec[[:space:]]+rm\b' \
   -e '\bchmod\b[^|;&]*[[:space:]](-[a-z]*R|--recursive)' \
-  -e '\bshred\b' \
-  -e '\btruncate[[:space:]]' \
+  -e '(^|[|;&(])[[:space:]]*shred\b' \
+  -e '(^|[|;&(])[[:space:]]*truncate\b' \
   -e '[[:space:]]>[[:space:]]*/dev/(sd|disk|hd|nvme|vd|mapper)' \
   -e '\bdd[[:space:]]' \
   -e '\bmkfs'; then

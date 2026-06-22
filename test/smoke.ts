@@ -124,8 +124,14 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   for (const cmd of ["find . -name x -delete", "git clean -fdx", "git clean --force", "chmod -R 777 /", "shred -u f", "truncate -s 0 db", "rm --recursive --force /data"]) {
     check(`guard: blocks ${cmd}`, guardExit(cmd) === 2);
   }
-  // Must NOT over-block benign forms.
+  // Must NOT over-block benign forms — incl. shred/truncate as an ARGUMENT or
+  // filename (anchored to command position), and a post-operator command position
+  // must still block.
   check("guard: allows non-recursive chmod + git status", guardExit("chmod 755 f") === 0 && guardExit("git status") === 0);
+  for (const cmd of ["cat shred.log", "grep -r truncate src/", "psql -c 'truncate table t'"]) {
+    check(`guard: allows benign ${cmd}`, guardExit(cmd) === 0);
+  }
+  check("guard: still blocks shred/truncate after an operator", guardExit("echo x | shred f") === 2 && guardExit("a && truncate -s 0 db") === 2);
 } else {
   check("guard: SKIPPED (hook not functional in this environment)", true);
 }
