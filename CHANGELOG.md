@@ -3,6 +3,58 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
+## [Unreleased]
+
+Skeptic-review hardening pass: fix a critical checkpoint-label vulnerability,
+close several under-flag/over-claim gaps, and replace qualitative value claims
+with reproducible numbers.
+
+### Security
+- **Checkpoint label `..` no longer wipes the temp dir.** `safeLabel` admitted the
+  path-segment specials `.`/`..`, so a `..` label made `checkpoint()` resolve to the
+  temp root and `rmSync` it recursively. Reject them explicitly and route every
+  store/meta join through a `containedPath()` containment check.
+- **`git clean --force` is classified destructive.** The force regex matched bundled
+  short clusters but not the long `--force`, so a force-clean ran as read-only — no
+  effect-tracking, no destructive nudge. A glob/redirect/`$()` no longer downgrades a
+  destructive verb (`rm *`, `shred f > /dev/null`, `git reset --hard $(…)`) to `complex`.
+- **Record store is owner-only.** The per-project store dir is now `0700` and record /
+  lock / probe files `0600`, so captured stdout/stderr (possibly secrets) is not
+  group/other-readable on a shared host.
+- **Guard hook hardened.** `VEIL_BYPASS=1` is honored only as a leading env-assignment
+  (a trailing `# VEIL_BYPASS=1` comment no longer bypasses), and the danger set now
+  covers `find -delete`, `git clean -f/--force`, `chmod -R`, `shred`, `truncate`, and
+  `rm --recursive/--force` — with `shred`/`truncate` anchored to command position so a
+  benign argument/filename isn't mis-blocked.
+
+### Fixed
+- **`veil init` never deletes user content** between mismatched markers: an in-place
+  replace happens only for exactly one well-formed block; ambiguous marker topologies
+  append instead of swallowing the text between an orphan start and a later block.
+- **Condensing surfaces more signal.** The lexicon now covers crash idioms with no
+  error/fail keyword (`Segmentation fault`, `SIGSEGV`, `CONFLICT`, `! [rejected]`,
+  `undefined reference`, `timed out`, `N high severity vulnerabilities`, …), and the
+  elision marker reports the *true* signal total with a `+N more` overflow note instead
+  of silently capping at five.
+- **Snapshot method honesty.** `method: "clone"` is reported only within one volume;
+  a cross-volume / non-APFS `cp -cR` (which silently full-copies) is now reported as
+  `method: "rsync"`.
+
+### Added
+- **Value metrics (`npm run metrics`).** Agent-turns-saved (55% fewer round-trips),
+  sandbox-escapes-blocked (5/5), signal-recall (100% on a labeled corpus), and
+  checkpoint cost (CoW clone vs rsync). Deterministic dimensions are asserted in the
+  smoke suite so the published figures can't drift.
+- **Falsifiable backtest floor.** A per-short-command envelope-overhead floor catches
+  fixed JSON bloat the byte-weighted net% structurally could not.
+
+### Changed
+- Docs corrected to match what ships: the sandbox is *probed lazily on first use* (not
+  "self-tests at startup"), the guard hook is a *routing guard, not a security
+  boundary*, the backtest measures *byte* savings (not a tokenizer), `sh_plan` over-
+  flags *for recognized patterns* (undecidable constructs stay `complex`/`unknown`),
+  and the suite is **228** assertions (some platform-gated), not 187.
+
 ## [0.4.0] — 2026-06-22
 
 Hardening pass addressing six external critiques: weak adoption story, an

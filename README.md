@@ -20,7 +20,32 @@ when needed, and risky commands get a real safety net.
 - **Verify in one call.** `expect: { exit: 0, file_exists: "dist/index.js" }` — no follow-up `ls`/`grep`.
 - **Safety net.** `sh_checkpoint`/`sh_restore` (CoW snapshot) and an opt-in kernel `sandbox` for risky commands.
 - **Detail is stored, not re-emitted.** Pull `sh_detail id=cmd3 selector=stdout` only if needed — and it **survives a server restart** (disk-backed).
-- **Token economy is the consequence, not the bet.** Quiet output is a side effect of returning structure; the structure and safety stay valuable even as context windows grow. Condensing hides bulk, never signal (see [Output honesty](#output-honesty)).
+- **Token economy is the consequence, not the bet.** Quiet output is a side effect of returning structure; the structure and safety stay valuable even as context windows grow. Condensing hides bulk while surfacing failure signal — a best-effort heuristic, measured at **100% recall** on a labeled corpus of buried failures (see [Output honesty](#output-honesty) and [Metrics](#metrics)).
+
+## Why veil
+
+Much of what an agent gets from veil — quieter output, fewer manual checks — you can
+approximate with Bash + truncation + careful prompting. The reason to adopt is the
+**three things a shell genuinely cannot do**, each with a number you can reproduce
+(`npm run metrics`):
+
+1. **Verify in one call, not three.** `expect` folds a `run → check → grep` loop into
+   a single structured call (`exit`, `stdout_matches`, `file_exists`, `changed`, …),
+   and effects come back **typed** — so "what changed?" needs no `git status`
+   round-trip. → **55% fewer MCP round-trips** across five common tasks (11 → 5).
+2. **A real safety net — checkpoint & roll back.** `sh_checkpoint`/`sh_restore` wrap a
+   risky refactor in an undo. On a same-volume APFS tree it's a copy-on-write clone:
+   **~1.5× faster than an rsync mirror and near space-free** (~0 MB vs 60 MB on a
+   60 MB tree), cheap enough to make a checkpoint-before-every-risky-step a habit.
+3. **Kernel-enforced confinement, not a prompt.** `sandbox: true` confines writes to
+   cwd + temp (and optionally denies network) via the OS sandbox — and **refuses to
+   run** rather than execute unconfined where unavailable. An adversarial corpus of
+   escape attempts is **blocked 5/5** while a legitimate in-cwd write still lands.
+
+Everything else — quiet output, addressable detail, retry, classification — is
+genuine convenience layered on top, not the moat. Honest scope: the sandbox is solid
+on macOS and experimental on Linux (see [Security](#security)); the numbers above are
+from [Metrics](#metrics), reproducible locally with no account.
 
 ## Why an MCP server, not a forked shell
 
@@ -71,7 +96,7 @@ commands. To *enforce* it, see [the guard hook](#optional-enforce-with-a-hook).
 |------|---------|
 | `sh_run` | Execute a command → quiet structured result (exit, duration, files changed, token-aware stdout/stderr). Options below. |
 | `sh_detail` | Pull full stored `stdout`/`stderr`/`meta`/`trace` for a previous run by id — no re-run. Records are **disk-backed**, so this works even after the server restarts. `match=<regex>` greps the stored stream (matching lines + numbers) to find a value condensing hid, without dumping it all. |
-| `sh_plan` | **Static safety pre-check** (not an execution dry-run): predicts a command's blast-radius category (read-only / mutating / destructive / network / complex / unknown), reversibility, and file effects **without executing**. A top-level pipeline/list (`a && b`, `c \| d`) is decomposed and classified per-segment, worst case wins; substitution/redirect/glob are undecidable and stay `complex`. Errors bias toward over-flagging, never under. |
+| `sh_plan` | **Static safety pre-check** (not an execution dry-run): predicts a command's blast-radius category (read-only / mutating / destructive / network / complex / unknown), reversibility, and file effects **without executing**. A top-level pipeline/list (`a && b`, `c \| d`) is decomposed and classified per-segment, worst case wins; substitution/redirect/glob are undecidable and stay `complex` (though a destructive verb behind one is still surfaced). Errors bias toward over-flagging for the patterns it recognizes; genuinely-undecidable constructs stay `complex`/`unknown` — an honest limit, not a universal guarantee. |
 | `sh_checkpoint` | Snapshot a directory under a label (rollback point). APFS copy-on-write clone when possible, else rsync mirror. |
 | `sh_restore` | Restore a directory from a checkpoint (undo); refuses a target dir different from where the checkpoint was taken. |
 | `sh_checkpoints` | List checkpoint labels. |
@@ -100,8 +125,12 @@ emitted counts), `files_changed`, `timed_out`, `stdout_truncated`/`stderr_trunca
 
 Condensing saves tokens but must not hide signal. Therefore:
 
-- A mid-stream `FAIL`/`error`/`warning` between head and tail is **surfaced** inline
-  (content-aware `signals.ts`), not silently dropped.
+- A mid-stream failure between head and tail is **surfaced** inline (content-aware
+  `signals.ts`) — the lexicon covers crash idioms with no error/fail keyword too
+  (`Segmentation fault`, `SIGSEGV`, `CONFLICT`, `! [rejected]`, `timed out`, …). If
+  more distinct signals exist than fit inline, the marker reports the **true total**
+  with a `+N more` overflow note (never a silent cap). This is a best-effort heuristic,
+  not a proof — but it is **measured**: 100% recall on a labeled corpus ([Metrics](#metrics)).
 - A byte-capped stream is **labeled** (the kept tail is marked; the torn first
   fragment dropped) and never presents its tail as the head.
 - `stdout_lines`/`stderr_lines` are the **true emitted** count, not just retained bytes.
@@ -173,7 +202,10 @@ All tunables are env-overridable (no rebuild):
 The nudge is a soft preference. [`hooks/veil-guard.sh`](hooks/veil-guard.sh)
 is a `PreToolUse` guard that hard-blocks only **verbose** (installs / builds / test
 runners) or **dangerous** (`rm -rf`, `dd`, `mkfs`, raw-device writes) Bash commands,
-steering them to `sh_run`. Commands `sh_run` **can't** help with are explicitly
+steering them to `sh_run`. It is a **routing guard, not a security boundary**: it
+changes *which tool* the agent reaches for, never whether a command may run (it is
+fail-open and `VEIL_BYPASS`-able, and `sh_run` will execute the same command). Real
+containment is the kernel [`sandbox`](#security), not this hook. Commands `sh_run` **can't** help with are explicitly
 **allowed** through to raw Bash: long-running / `dev` / `watch` / `start` servers,
 backgrounded jobs (trailing `&`), process management (`kill`/`pkill`/`pgrep`), and
 interactive/TTY tools (`vim`/`less`/`top`/`tail -f`) — blocking those would only
@@ -205,8 +237,9 @@ the call **refuses** rather than running unconfined.
 **Portability is honest, not universal.** The sandbox is an opt-in best-effort layer,
 not a headline guarantee: macOS is solid; Linux bubblewrap is experimental and needs
 unprivileged user namespaces; **containers** (Docker, Codespaces, many CI runners) and
-Ubuntu 24.04+ often restrict those, so `sandbox` self-tests at startup and reports
-unavailable there — by design, so it refuses rather than pretends. The default,
+Ubuntu 24.04+ often restrict those, so `sandbox` is probed lazily on the first
+sandboxed call and reports unavailable there — by design, so it refuses rather than
+pretends. The default,
 non-sandboxed path works everywhere. (A namespace-free Linux backend via Landlock is
 on the roadmap to cover the container case.)
 
@@ -222,7 +255,7 @@ on the roadmap to cover the container case.)
 | **B / K-lite** | static safety pre-check + classification (`sh_plan`) — segment-aware, *not* an execution dry-run | ✅ done |
 | **C** | checkpoint / rollback | ✅ done |
 | **K** | real sandbox (macOS `sandbox-exec`) | ✅ done |
-| **C+** | atomic CoW checkpoints (APFS `clonefile`) | ✅ done |
+| **C+** | atomic CoW checkpoints (APFS `clonefile`) | ✅ done — same-volume APFS; cross-volume / non-APFS falls back to the rsync mirror and reports `method: rsync` (no false "clone") |
 | **J+** | disk-backed record store (`sh_detail` survives restart, TTL-pruned) | ✅ done (v0.4) |
 | — | `veil init` zero-friction project setup | ✅ done (v0.4) |
 | **K+** | Linux sandbox (bubblewrap) | 🧪 experimental — write-confine validated on Linux CI (needs unprivileged user namespaces; Ubuntu 24.04+ / containers restrict them, so `sandbox` reports unavailable there unless relaxed) |
@@ -240,15 +273,33 @@ Don't take the numbers on trust — reproduce them. Everything runs locally, no 
 ```bash
 git clone https://github.com/vkmtx/veil-mcp && cd veil-mcp && npm install
 npm run typecheck    # tsc --noEmit
-npm test             # end-to-end smoke (187 assertions over a live stdio server)
-npm run backtest     # token-savings regression (weighted net must stay > floor)
+npm test             # end-to-end smoke (228 assertions; some are platform-gated, so a single run executes a subset)
+npm run backtest     # byte-savings regression (a weighted bulk-condense ratio + a per-command envelope-overhead floor)
 npm run bench        # detailed 5-dimension benchmark (economy, latency, per-feature, condense, session)
+npm run metrics      # value metrics: agent-turns-saved, sandbox-escapes-blocked, signal-recall, checkpoint cost
 ```
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the suite on macOS
 **and** Linux (with bubblewrap + strace installed), so the Linux-only sandbox (K+)
 and trace (A) paths are exercised where this dev machine (macOS) can't. The badge at
 the top reflects the latest run; the claims here are whatever that pipeline asserts.
+
+## Metrics
+
+`npm run metrics` quantifies the value the rest of this README describes — the moat
+that raw Bash + truncation can't replicate. Numbers below are illustrative
+(machine-dependent for the timing rows); reproduce them yourself.
+
+| Metric | Result | What it measures |
+|--------|--------|------------------|
+| **Agent turns saved** | **55% fewer** round-trips (11 → 5) | MCP calls collapsed by `expect` + effects + retry across 5 common tasks — counts *calls*, not bytes, so it holds as context windows grow |
+| **Sandbox escapes blocked** | **5 / 5** (control write lands) | adversarial outside-cwd / spawned-child / symlink / network writes denied by the kernel; a legitimate in-cwd write still succeeds (selective, not deny-all) |
+| **Signal recall** | **100%** on a 10-fixture corpus | buried failures surfaced from the elided middle, incl. non-keyword crash idioms (`SIGSEGV`, `CONFLICT`, `! [rejected]`, `timed out`) |
+| **Checkpoint cost** | clone **~1.5× faster, ~0 MB** vs rsync 60 MB | CoW clone latency + disk vs the rsync mirror on a 60 MB tree (macOS / same-volume APFS) |
+
+The deterministic rows (turns, recall) are asserted in the smoke suite from the same
+fixtures, so the published figures can't silently drift. On platforms without the
+real sandbox/clone, those rows self-report unavailable rather than printing a number.
 
 ## Community
 
@@ -268,6 +319,6 @@ MIT — see [LICENSE](LICENSE).
 ## Status
 
 v0.4 — experimental. Features I, J, H, G, M, B, K-lite, C, **K**, **C+**, plus v0.4's
-**disk-backed store** and **`veil init`**, built and tested (187 smoke assertions +
-backtest, all green on macOS); **K+** and **A** structured and validated on Linux CI.
+**disk-backed store** and **`veil init`**, built and tested (228 smoke assertions +
+backtest + value metrics, all green on macOS); **K+** and **A** structured and validated on Linux CI.
 A young, single-author project — judge it by the reproducible suite above, not its age.
