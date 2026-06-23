@@ -179,6 +179,16 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
     check(`guard: allows benign ${cmd}`, guardExit(cmd) === 0);
   }
   check("guard: still blocks shred/truncate after an operator", guardExit("echo x | shred f") === 2 && guardExit("a && truncate -s 0 db") === 2);
+  // Verbose installs/builds/tests are routed to sh_run — incl. modern tools the old
+  // list missed (bun/deno/uv) and image builds (docker build / compose build).
+  for (const cmd of ["npm install", "pytest -q", "cargo build", "bun install", "bun add zod", "deno test", "uv pip install ruff", "uv sync", "docker build -t x .", "docker compose build", "docker-compose build"]) {
+    check(`guard: blocks verbose ${cmd}`, guardExit(cmd) === 2);
+  }
+  // ...but read-only (`docker ps|logs`) and dev-server forms (`run dev/start`, `--watch`)
+  // of the very same tools must still pass through to raw Bash.
+  for (const cmd of ["docker ps", "docker logs app", "bun run dev", "npm run start", "deno run --watch x"]) {
+    check(`guard: allows passthrough ${cmd}`, guardExit(cmd) === 0);
+  }
 } else {
   check("guard: SKIPPED (hook not functional in this environment)", true);
 }
