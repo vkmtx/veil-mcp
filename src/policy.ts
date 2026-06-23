@@ -9,18 +9,27 @@
  *
  * This is the one guarantee a presentation layer (or a forked shell) cannot give
  * on its own — it lives in the kernel. `sandbox-exec` is deprecated by Apple but
- * still functional and the standard unprivileged option on macOS. A Linux backend
- * via bubblewrap (`bwrap`) is implemented and fail-closed; the arg-builder is
- * unit-tested and live write-confinement is asserted by a Linux CI test
- * (test/smoke.ts, Ubuntu leg). Treat the Linux path as experimental.
+ * still functional and the standard unprivileged option on macOS.
+ *
+ * On Linux there are TWO backends, tried in order of capability:
+ *   1. bubblewrap (`bwrap`) — full write-confine + network-deny + secret read-mask,
+ *      but needs working UNPRIVILEGED user namespaces (containers / CI / Ubuntu
+ *      24.04+ often restrict these).
+ *   2. Landlock via `landrun` — a namespace-FREE kernel LSM that works exactly where
+ *      bwrap can't (containers, locked-down CI). Scoped: WRITE-confine only in v1;
+ *      it refuses (rather than fakes) network-deny and secret read-confine, since
+ *      Landlock is an allow-list model. Kernel 5.13+; reported unavailable otherwise.
+ * Both arg-builders are unit-tested; bwrap live write-confine is asserted on the
+ * Ubuntu CI leg. Treat the Linux paths as experimental.
  *
  * HONESTY CONTRACT: if a sandbox is requested but unavailable, the caller MUST
  * refuse to run — never silently execute unconfined. `sandboxAvailable()` is how
- * the caller checks before relying on confinement.
+ * the caller checks before relying on confinement. A backend that cannot enforce a
+ * REQUESTED knob (e.g. Landlock + network-deny) throws so the caller refuses too.
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { resolve, dirname, basename, join } from "node:path";
 
@@ -83,14 +92,61 @@ function hasBwrap(): boolean {
   return cachedBwrap;
 }
 
+let cachedLandlock: boolean | undefined;
+
 /**
- * True where real kernel confinement is available: macOS (sandbox-exec) or Linux
- * with bubblewrap installed. Fail-closed everywhere else, so callers refuse rather
- * than run unconfined.
+ * Can Landlock (via `landrun`) actually confine here? We do NOT trust landrun's exit
+ * code or `--version` — a tool that silently runs unconfined on a pre-5.13 kernel
+ * would make veil claim `sandboxed` while running free, the worst honesty violation.
+ * Instead EMPIRICALLY prove confinement: grant write to a throwaway dir only, then in
+ * one confined shell write a marker INSIDE it (must land → proves the command really
+ * executed, not a pre-exec abort) and attempt a write OUTSIDE every grant (must be
+ * denied → proves Landlock enforced). Available only if BOTH hold. Namespace-free, so
+ * this is true in containers where bwrap is not. Probed once per process.
+ */
+function hasLandlock(): boolean {
+  if (cachedLandlock !== undefined) return cachedLandlock;
+  cachedLandlock = false;
+  let dir: string | undefined;
+  const escape = join(tmpdir(), `veil-ll-escape-${process.pid}`);
+  try {
+    rmSync(escape, { force: true });
+    // Canonicalize the probe dir so the grant matches where the marker is actually
+    // written (production canonicalizes its roots too; tmpdir may be symlinked).
+    dir = mkdtempSync(join(tmpdir(), "veil-ll-"));
+    try { dir = realpathSync(dir); } catch { /* keep the unresolved path */ }
+    const marker = join(dir, "ok");
+    // Mirror the production grant set (--rox / + --rwx /dev + the writable roots) so
+    // the probe enforces exactly what a real run would. --rwx <dir> is the only
+    // FILESYSTEM write grant; the marker write must succeed, the escape write (outside
+    // every grant) must not.
+    try {
+      execFileSync(
+        "landrun",
+        ["--rox", "/", "--rwx", "/dev", "--rwx", dir, "--", "/bin/sh", "-c", `printf x > ${marker}; printf y > ${escape}`],
+        { stdio: "ignore" },
+      );
+    } catch {
+      /* nonzero is EXPECTED — the denied escape write makes the shell exit nonzero */
+    }
+    cachedLandlock = existsSync(marker) && !existsSync(escape);
+  } catch {
+    cachedLandlock = false; // landrun absent or the probe could not be set up
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    rmSync(escape, { force: true });
+  }
+  return cachedLandlock;
+}
+
+/**
+ * True where real kernel confinement is available: macOS (sandbox-exec), or Linux
+ * with bubblewrap OR Landlock (`landrun`). Fail-closed everywhere else, so callers
+ * refuse rather than run unconfined.
  */
 export function sandboxAvailable(): boolean {
   if (process.platform === "darwin") return existsSync(SANDBOX_EXEC);
-  if (process.platform === "linux") return hasBwrap();
+  if (process.platform === "linux") return hasBwrap() || hasLandlock();
   return false;
 }
 
@@ -201,9 +257,39 @@ export function buildBwrapArgs(command: string, cwd: string, opts: SandboxOpts =
 }
 
 /**
+ * Build a Landlock (`landrun`) command line — the namespace-free Linux backend for
+ * containers/CI where bwrap can't run. Grant read+exec on the whole tree (so binaries
+ * and shared libs load), write on /dev (devices like /dev/null), and read-write-exec
+ * on the confined roots (cwd + temp + extras); everything else is read-only. No
+ * `--best-effort`, so landrun aborts rather than run unconfined on a kernel without
+ * Landlock — preserving the honesty contract.
+ *
+ * SCOPED, v1: write-confine only. Landlock is an allow-list model, so a secret
+ * read-DENY can't be expressed as a subtraction, and network confinement is
+ * kernel/ABI-dependent — so this THROWS (caller then refuses) when `network:false`
+ * or `denyRead` is requested, rather than silently failing to enforce them.
+ */
+export function buildLandrunArgs(command: string, cwd: string, opts: SandboxOpts = {}): string {
+  if (opts.network === false) {
+    throw new Error("landlock backend cannot enforce network deny — install bubblewrap (bwrap) for network confinement");
+  }
+  if (opts.denyRead && opts.denyRead.length) {
+    throw new Error("landlock backend cannot enforce secret read-confine (allow-list model) — install bubblewrap (bwrap) or run on macOS");
+  }
+  const rwx = safeWriteRoots(cwd, opts)
+    .map((p) => `--rwx ${shQuote(p)}`)
+    .join(" ");
+  // --rox / : read+exec everywhere; --rwx /dev : writable devices (/dev/null etc.);
+  // --rwx <roots> : the only writable filesystem locations.
+  return `landrun --rox / --rwx /dev ${rwx} -- /bin/sh -c ${shQuote(command)}`;
+}
+
+/**
  * Wrap `command` so it runs under the platform sandbox. The result is a shell
  * command line (run via the normal shell:true path). Throws if a writable path is
  * unsafe or the platform is unsupported; callers must have checked sandboxAvailable().
+ * On Linux, prefer bubblewrap (more capable) and fall back to Landlock (`landrun`)
+ * where user namespaces are unavailable.
  */
 export function wrapCommand(command: string, cwd: string, opts: SandboxOpts = {}): string {
   if (process.platform === "darwin") {
@@ -211,7 +297,9 @@ export function wrapCommand(command: string, cwd: string, opts: SandboxOpts = {}
     return `${SANDBOX_EXEC} -p ${shQuote(profile)} /bin/sh -c ${shQuote(command)}`;
   }
   if (process.platform === "linux") {
-    return buildBwrapArgs(command, cwd, opts);
+    if (hasBwrap()) return buildBwrapArgs(command, cwd, opts);
+    if (hasLandlock()) return buildLandrunArgs(command, cwd, opts);
+    throw new Error("no Linux sandbox backend available (need bubblewrap or Landlock/landrun)");
   }
   throw new Error(`sandbox not supported on platform: ${process.platform}`);
 }

@@ -25,6 +25,14 @@ Three scoped capabilities, each shipping only what its substrate can honestly ba
   exit / retry-recovery / duration `p50`/`p90` / file-churn with explicit sample size
   `n` and recency window. Restates the local (capped, TTL-pruned) store; makes **no**
   prediction and **no** causal claim. Read-only. (`RunRecord` gains an `at` timestamp.)
+- **Landlock Linux sandbox backend (K++).** A namespace-free fallback (via `landrun`,
+  kernel 5.13+) that write-confines in containers / CI / Ubuntu 24.04+ where
+  bubblewrap's unprivileged user namespaces are restricted. `sandboxAvailable()` now
+  reports true on Linux with **bwrap OR Landlock**; `wrapCommand` prefers bwrap and
+  falls back to landrun. Scoped, honest: write-confine only — it **refuses** (so the
+  caller refuses) network-deny / secret-read-confine rather than fake them, and its
+  self-test runs a real confined no-op (no `--best-effort`) so an unsupported kernel
+  reports unavailable instead of silently running free.
 
 ## [0.5.0] — 2026-06-22
 
