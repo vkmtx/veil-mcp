@@ -318,7 +318,8 @@ MIT — see [LICENSE](LICENSE).
 
 ## Status
 
-v0.4 — experimental. Features I, J, H, G, M, B, K-lite, C, **K**, **C+**, plus v0.4's
+v0.5 — experimental. Features I, J, H, G, M, B, K-lite, C, **K**, **C+**, plus the
 **disk-backed store** and **`veil init`**, built and tested (228 smoke assertions +
 backtest + value metrics, all green on macOS); **K+** and **A** structured and validated on Linux CI.
+v0.5 is a security + honesty **hardening pass** (see [CHANGELOG](CHANGELOG.md)).
 A young, single-author project — judge it by the reproducible suite above, not its age.

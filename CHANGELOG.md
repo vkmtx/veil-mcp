@@ -3,7 +3,7 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
-## [Unreleased]
+## [0.5.0] — 2026-06-22
 
 Skeptic-review hardening pass: fix a critical checkpoint-label vulnerability,
 close several under-flag/over-claim gaps, and replace qualitative value claims
