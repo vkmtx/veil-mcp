@@ -186,9 +186,11 @@ contexts. Two opt-in layers harden the risky cases:
 <details><summary>Enable the guard hook</summary>
 
 A `PreToolUse` guard that hard-blocks only **verbose** (installs / builds / test
-runners) or **dangerous** (`rm -rf`, `dd`, `mkfs`, `shred`, `find -delete`, raw-device
-writes) Bash, steering it to `sh_run`. Commands `sh_run` *can't* help with are
-explicitly **allowed** through to raw Bash: long-running `dev`/`watch`/`start` servers,
+runners — `npm`/`pnpm`/`yarn`/`bun`/`deno`/`uv`/`pip`/`cargo`/`go`/…, plus
+`docker build`/`buildx`/`compose build`) or **dangerous** (`rm -rf`, `dd`, `mkfs`,
+`shred`, `find -delete`, raw-device writes) Bash, steering it to `sh_run`. Commands
+`sh_run` *can't* help with are explicitly **allowed** through to raw Bash: long-running
+`dev`/`watch`/`start` servers (incl. `bun run dev`, `docker compose up`),
 backgrounded jobs (trailing `&`), process management (`kill`/`pkill`), and
 interactive/TTY tools (`vim`/`less`/`top`/`tail -f`). It is **fail-open** (any parse
 error → allow, so a bug can never block all Bash), with an escape hatch: prefix a
@@ -220,7 +222,7 @@ Don't take the numbers on trust — no account, all local:
 
 ```bash
 git clone https://github.com/vkmtx/veil-mcp && cd veil-mcp && npm install
-npm test          # 270+ smoke assertions over a live stdio server (prints its tally; some platform-gated)
+npm test          # 285+ smoke assertions over a live stdio server (prints its tally; some platform-gated)
 npm run metrics   # the value numbers below
 npm run backtest  # byte-savings regression (bulk-condense ratio + per-command overhead floor)
 npm run bench     # detailed 5-dimension benchmark (economy, latency, per-feature, condense, session)
@@ -275,6 +277,7 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-*v0.5 — experimental, single-author. A security + honesty **hardening pass**
-([CHANGELOG](CHANGELOG.md)): 270+ smoke assertions + backtest + value metrics, green on
+*v0.6 — experimental, single-author. Adds read-confine, dry-run preview, run history,
+a namespace-free Landlock sandbox, and an honesty/correctness audit pass
+([CHANGELOG](CHANGELOG.md)): 285+ smoke assertions + backtest + value metrics, green on
 macOS and Linux CI. Judge it by the reproducible suite above, not its age.*
