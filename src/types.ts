@@ -22,6 +22,9 @@ export interface RunRecord {
   id: string;
   command: string;
   cwd: string;
+  /** wall-clock epoch ms when the run was recorded. Enables ordering + recency
+   *  windows in sh_history (id number is NOT a recency order across servers). */
+  at: number;
   exit: number;
   durationMs: number;
   timedOut: boolean;

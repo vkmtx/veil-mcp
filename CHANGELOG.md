@@ -3,6 +3,29 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
+## [Unreleased]
+
+Three scoped capabilities, each shipping only what its substrate can honestly back
+(no headline that the kernel or the stored data can't keep).
+
+### Added
+- **Secret read-confine.** `sandbox` gains `{ protect_secrets: true }` (built-in
+  credential-dir denylist: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud|gh`,
+  `~/.kube`, `~/.docker`) and `{ deny_read: [...] }` (extra dirs). macOS appends
+  `(deny file-read* (subpath …))` to the SBPL profile (rule order: later wins, so it
+  overrides `allow default`); Linux masks each dir with an empty `--tmpfs`. Reports
+  `secrets_protected: <n>`. Scoped by design — it blocks the **listed** paths, not a
+  proof against all exfiltration.
+- **Dry-run preview.** `sh_run { preview: true }` runs the command **inside a
+  disposable CoW clone of cwd**, returns the cwd-relative `files_changed`, and never
+  touches the real cwd (nothing is promoted). Refuses if the clone can't be made.
+  Honest scope, bannered in `preview_warning`: absolute-path / parent-dir / network
+  effects are **not** captured and may happen for real — this is **not** a sandbox.
+- **`sh_history`.** Descriptive aggregates over past runs of a command — observed
+  exit / retry-recovery / duration `p50`/`p90` / file-churn with explicit sample size
+  `n` and recency window. Restates the local (capped, TTL-pruned) store; makes **no**
+  prediction and **no** causal claim. Read-only. (`RunRecord` gains an `at` timestamp.)
+
 ## [0.5.0] — 2026-06-22
 
 Skeptic-review hardening pass: fix a critical checkpoint-label vulnerability,

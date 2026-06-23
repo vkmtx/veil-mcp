@@ -1,7 +1,8 @@
 /** Feature H — effects as data. File changes via git porcelain before/after diff. */
 
-import { execSync } from "node:child_process";
-import { resolve, relative } from "node:path";
+import { execFileSync, execSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { resolve, relative, join } from "node:path";
 
 /** Returns the set of porcelain status lines, or null if cwd is not a git repo. */
 export function gitStatus(cwd: string): Set<string> | null {
@@ -37,6 +38,67 @@ export function effectsFromTrace(wrote: string[], cwd: string): string[] {
     out.push(`wrote ${rel}`);
   }
   return out;
+}
+
+/**
+ * Dry-run preview differ: list how a disposable clone diverged from the origin tree
+ * after a command ran inside it. Uses `diff -rq` (excluding the VCS dir, which is
+ * noisy and large) and parses its three line shapes into cwd-relative change lines:
+ *   - "Only in <clone>/sub: name"  → created <sub/name>
+ *   - "Only in <origin>/sub: name" → deleted <sub/name>
+ *   - "Files <origin>/x and <clone>/x differ" → modified <x>
+ * Paths are reported relative to the clone root. This reflects cwd-RELATIVE writes
+ * only; out-of-cwd / network effects are invisible here (the caller banners that).
+ */
+export function cloneDiff(origin: string, clone: string): string[] {
+  // Canonicalize so the prefix checks below match `diff`'s echoed paths even when
+  // cwd/tmp is reached through a symlink (e.g. /tmp → /private/tmp on macOS).
+  const canon = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const o = canon(origin);
+  const c = canon(clone);
+  let out = "";
+  try {
+    out = execFileSync("diff", ["-rq", "--exclude=.git", o, c], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch (e) {
+    // diff exits 1 when trees differ — that's the normal case, output is on stdout.
+    const err = e as { status?: number; stdout?: string };
+    if (err.status === 1 && typeof err.stdout === "string") out = err.stdout;
+    else return []; // exit 2 (real error) or no diff binary → nothing to report
+  }
+  const rel = (root: string, dir: string, name: string): string => {
+    const r = relative(root, join(dir, name));
+    return r || name;
+  };
+  const changes: string[] = [];
+  for (const line of out.split("\n")) {
+    if (!line) continue;
+    let m = /^Only in (.+): (.+)$/.exec(line);
+    if (m) {
+      const [, dir, name] = m;
+      // dir is an absolute path under either origin or clone.
+      if (dir === c || dir.startsWith(c + "/")) changes.push(`created ${rel(c, dir, name)}`);
+      else if (dir === o || dir.startsWith(o + "/")) changes.push(`deleted ${rel(o, dir, name)}`);
+      continue;
+    }
+    // "Files <o>/REL and <c>/REL differ" — REL is identical on both sides and may
+    // itself contain " and ", so anchor on the clone-root marker (a random temp path,
+    // unambiguous) rather than a greedy ` and ` split that a filename could fool.
+    if (line.startsWith("Files ") && line.endsWith(" differ")) {
+      const body = line.slice("Files ".length, -" differ".length);
+      const idx = body.indexOf(" and " + c + "/");
+      if (idx >= 0) {
+        const cloneAbs = body.slice(idx + " and ".length); // "<c>/REL"
+        changes.push(`modified ${relative(c, cloneAbs) || cloneAbs}`);
+      }
+    }
+  }
+  return changes;
 }
 
 /** Path from a porcelain line: `XY path`, or the new name from `XY old -> new`. */

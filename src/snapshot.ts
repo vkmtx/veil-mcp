@@ -12,11 +12,12 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, readdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
 const STORE = join(tmpdir(), "veil-checkpoints");
+const PREVIEW_STORE = join(tmpdir(), "veil-previews");
 // Origin sidecars live in a SEPARATE tree, not inside STORE — so they never
 // collide with a payload dir (a label like `foo.dir` is otherwise ambiguous) and
 // list() needs no filtering.
@@ -160,6 +161,59 @@ export function restore(label: string, dir: string): CheckpointInfo {
   }
   execFileSync("rsync", ["-a", "--delete", ...EXCLUDES, `${src}/`, `${dir}/`], { stdio: "ignore" });
   return { label, dir, path: src };
+}
+
+export interface PreviewClone {
+  /** absolute path of the disposable clone the command will run inside. */
+  path: string;
+  method: "clone" | "rsync";
+}
+
+/**
+ * Feature: dry-run preview. Make a FULL, disposable, runnable copy of `dir` (no
+ * excludes — node_modules/.git are kept so builds and git commands work inside it)
+ * under a fresh temp dir. APFS CoW (`cp -cR`) makes this instant + space-free on the
+ * same volume; otherwise a full rsync byte-copy. The command then executes in the
+ * clone and we diff clone-vs-origin, so the real cwd is never touched. Returns null
+ * if the copy can't be made (caller must then refuse rather than run in the real cwd).
+ */
+export function cloneForPreview(dir: string): PreviewClone | null {
+  if (!existsSync(dir)) return null;
+  let base: string;
+  try {
+    mkdirSync(PREVIEW_STORE, { recursive: true });
+    base = mkdtempSync(join(PREVIEW_STORE, "p-"));
+  } catch {
+    return null; // can't even make the temp parent → caller refuses
+  }
+  const dest = join(base, "tree");
+  // CoW clone first (instant on APFS); keep ALL files (unlike checkpoint, which
+  // prunes .git/node_modules) so the previewed command behaves like the real one.
+  if (process.platform === "darwin") {
+    try {
+      execFileSync("cp", ["-cR", dir, dest], { stdio: "ignore" });
+      return { path: dest, method: "clone" };
+    } catch {
+      rmSync(dest, { recursive: true, force: true });
+    }
+  }
+  try {
+    ensureRsync();
+    mkdirSync(dest, { recursive: true });
+    execFileSync("rsync", ["-a", `${dir}/`, `${dest}/`], { stdio: "ignore" });
+    return { path: dest, method: "rsync" };
+  } catch {
+    rmSync(base, { recursive: true, force: true });
+    return null;
+  }
+}
+
+/** Remove a preview clone and its temp parent. Best-effort. */
+export function dropPreview(clonePath: string): void {
+  // clonePath is <PREVIEW_STORE>/p-XXXX/tree — drop the whole p-XXXX parent.
+  const parent = resolve(clonePath, "..");
+  if (parent.startsWith(PREVIEW_STORE)) rmSync(parent, { recursive: true, force: true });
+  else rmSync(clonePath, { recursive: true, force: true });
 }
 
 /** List existing checkpoint labels. */
