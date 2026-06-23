@@ -67,7 +67,10 @@ if printf '%s' "$CMD" | grep -Eq '&[[:space:]]*$|\b(dev|serve|watch|preview|star
 fi
 
 # Verbose: package managers / builds / test runners — sh_run condenses these massively.
-if printf '%s' "$CMD" | grep -Eq '\b(npm|pnpm|yarn|pip|pip3|cargo|go|gradle|mvn|bundle|composer|gem)\b[^|;&]*\b(install|i|ci|add|build|test|run)\b|\b(make|tsc|webpack|vite|rollup|esbuild|pytest|jest|vitest|mocha)\b'; then
+# Modern tools (bun/deno/uv) and image builds (docker build / compose build) are just as
+# verbose as npm/pip. Note `docker ps|logs|run` and `docker compose up` are NOT matched here
+# — they are read-only or long-running and fall through to the allow path / raw Bash.
+if printf '%s' "$CMD" | grep -Eq '\b(npm|pnpm|yarn|bun|deno|uv|pip|pip3|cargo|go|gradle|mvn|bundle|composer|gem)\b[^|;&]*\b(install|i|ci|add|build|test|run|sync)\b|\b(make|tsc|webpack|vite|rollup|esbuild|pytest|jest|vitest|mocha)\b|\bdocker(-compose|[[:space:]]+compose)?[[:space:]]+(build|buildx)\b'; then
   echo "veil: verbose command — prefer sh_run (quiet structured result; full output via sh_detail). Add expect to verify in one call. Prefix VEIL_BYPASS=1 to force Bash." >&2
   exit 2
 fi
