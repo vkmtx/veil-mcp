@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
 import { extractSignals } from "../src/signals.js";
 import { diffStatus, effectsFromTrace } from "../src/effects.js";
-import { sandboxAvailable, buildProfile, buildBwrapArgs, defaultSecretPaths } from "../src/policy.js";
+import { sandboxAvailable, buildProfile, buildBwrapArgs, buildLandrunArgs, defaultSecretPaths } from "../src/policy.js";
 import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
 import { runInit } from "../src/init.js";
@@ -64,6 +64,19 @@ check("sandboxAvailable true on macOS", process.platform !== "darwin" || sandbox
 const bw = buildBwrapArgs("echo hi", "/tmp/work", {});
 check("bwrap ro-binds root, binds + chdir cwd, runs via sh", bw.includes("--ro-bind / /") && bw.includes("--bind") && bw.includes("--chdir") && bw.includes("/bin/sh -c"));
 check("bwrap unshare-net only when network denied", buildBwrapArgs("x", "/tmp/w", { network: false }).includes("--unshare-net") && !buildBwrapArgs("x", "/tmp/w", {}).includes("--unshare-net"));
+
+// K++ Landlock backend (landrun) — namespace-free; pure arg-builder, verifiable anywhere.
+const lr = buildLandrunArgs("echo hi", "/tmp/work", {});
+check("landrun grants rox / + rwx cwd + runs via sh", lr.includes("--rox /") && lr.includes("--rwx") && lr.includes("/tmp/work") && lr.includes("-- /bin/sh -c"));
+check("landrun grants writable /dev", lr.includes("--rwx /dev"));
+// honesty: a knob Landlock can't enforce makes the builder THROW (caller then refuses),
+// never silently run without it.
+let lrNet = false;
+try { buildLandrunArgs("x", "/tmp/w", { network: false }); } catch { lrNet = true; }
+check("landrun refuses network-deny (refuse, don't fake)", lrNet);
+let lrRead = false;
+try { buildLandrunArgs("x", "/tmp/w", { denyRead: ["/home/u/.ssh"] }); } catch { lrRead = true; }
+check("landrun refuses secret read-confine (allow-list model)", lrRead);
 
 // feature A — trace summarizer (the testable core) + platform detection.
 check("traceAvailable false off Linux", process.platform === "linux" || traceAvailable() === false);

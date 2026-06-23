@@ -169,11 +169,14 @@ server's full environment (secrets included) to them. It's a shell — run it in
 contexts. Two opt-in layers harden the risky cases:
 
 - **Kernel sandbox** (`sandbox: true`) — *the real boundary.* Confines writes to
-  cwd + temp via macOS `sandbox-exec` (Linux bubblewrap, experimental), optionally
-  denies network, and **refuses to run** rather than go unconfined. Honest scope:
-  solid on macOS; Linux bwrap needs unprivileged user namespaces, which containers /
-  Codespaces / Ubuntu 24.04+ often restrict — there it's probed lazily and reports
-  unavailable (a namespace-free Landlock backend is planned). The default
+  cwd + temp via macOS `sandbox-exec` (Linux bubblewrap / Landlock, experimental),
+  optionally denies network, blocks reads of secret dirs, and **refuses to run**
+  rather than go unconfined. Honest scope: solid on macOS; Linux bwrap needs
+  unprivileged user namespaces, which containers / Codespaces / Ubuntu 24.04+ often
+  restrict — there veil falls back to a **namespace-free Landlock backend** (via
+  `landrun`, kernel 5.13+) that write-confines where bwrap can't, and still reports
+  unavailable (refusing) if neither works. The Landlock path is write-confine only:
+  it *refuses* network-deny / secret-read-confine rather than fake them. The default
   non-sandboxed path works everywhere.
 - **Guard hook** (`hooks/veil-guard.sh`) — a **routing nudge, not a security
   boundary.** It steers verbose/dangerous Bash toward `sh_run`, but it is fail-open
@@ -245,8 +248,9 @@ strace), so the Linux-only sandbox and trace paths are exercised too.
 | **C / C+** | checkpoint / rollback · atomic CoW clone (same-volume APFS; cross-volume falls back to rsync, reported honestly) | ✅ done |
 | **K** | real sandbox (macOS `sandbox-exec`) | ✅ done |
 | **J+** | disk-backed record store (survives restart, TTL-pruned) | ✅ done |
+| **K-read / P / HIST** | secret read-confine (`sandbox.protect_secrets`) · dry-run `preview` (CoW clone, real cwd untouched) · descriptive `sh_history` | ✅ done |
 | **K+ / A** | Linux sandbox (bubblewrap) · structured trace (`strace`) | 🧪 experimental — validated on Linux CI |
-| **K++** | namespace-free Linux sandbox (Landlock) — covers containers/Codespaces | 🔭 planned |
+| **K++** | namespace-free Linux sandbox (Landlock via `landrun`) — write-confine in containers/Codespaces where bwrap can't | 🧪 experimental — arg-builder unit-tested |
 | — | streaming / PTY + background jobs | 🔭 planned |
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [ARCHITECTURE.md](ARCHITECTURE.md)

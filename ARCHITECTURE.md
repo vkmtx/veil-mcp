@@ -43,7 +43,7 @@ evaluate `assert`, and store the record for `sh_detail`.
 | `init.ts`            | `veil init` — idempotent per-project `CLAUDE.md` nudge writer + setup steps. |
 | `assert.ts`          | Post-condition evaluator (`expect`).                        |
 | `classify.ts`        | Static command classification (blast radius + mutations); top-level pipeline/list decomposed per-segment, worst case aggregated. |
-| `policy.ts`          | Real sandbox enforcement (macOS sandbox-exec SBPL; Linux bubblewrap). Write-confine + optional network-deny + **read-confine** of a secret-dir denylist (`deny file-read*` / `--tmpfs` mask). |
+| `policy.ts`          | Real sandbox enforcement (macOS sandbox-exec SBPL; Linux bubblewrap, else Landlock/`landrun`). Write-confine + optional network-deny + **read-confine** of a secret-dir denylist (`deny file-read*` / `--tmpfs` mask). Landlock backend is write-confine only and *refuses* knobs it can't enforce. |
 | `trace.ts`           | Structured syscall/FS trace (Linux strace) + read/write summarizer. |
 | `snapshot.ts`        | Checkpoint/restore — APFS CoW clone (`cp -c`) or rsync mirror; origin-dir guard. `cloneForPreview` makes a full disposable clone for `preview` runs. |
 | `tools/sh_run.ts`    | Compose exec+effects+render+store+assert+retry; read-confine + preview wiring. |
@@ -74,6 +74,7 @@ evaluate `assert`, and store the record for `sh_detail`.
 | **HIST** descriptive run history | done | `store.ts` `all()` + `tools/sh_history.ts` (+ `at` timestamp on `RunRecord`) |
 | **C+** atomic CoW checkpoints   | done (macOS) | `snapshot.ts` APFS `clonefile` (`cp -c`) + rsync fallback |
 | **K+** Linux sandbox backend    | experimental | `policy.ts` `buildBwrapArgs` (bubblewrap); arg-builder unit-tested, live write-confine covered by a Linux CI test (`test/smoke.ts`, Ubuntu leg) |
+| **K++** namespace-free Linux sandbox (Landlock) | experimental | `policy.ts` `buildLandrunArgs` + `hasLandlock` (via `landrun`, kernel 5.13+); covers containers/CI without user namespaces. Write-confine only — refuses network-deny / read-confine. Arg-builder unit-tested; fail-closed self-test |
 | **A** structured trace          | experimental | `trace.ts` (strace summarizer, best-effort) + `sh_run` `trace`; capture validated on Linux CI |
 
 ## Boundary: what this layer can and cannot guarantee

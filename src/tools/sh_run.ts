@@ -178,7 +178,7 @@ export function registerShRun(server: McpServer): void {
               {
                 type: "text",
                 text: JSON.stringify({
-                  error: "sandbox requested but unavailable (needs macOS sandbox-exec or Linux bubblewrap); refusing to run unconfined",
+                  error: "sandbox requested but unavailable (needs macOS sandbox-exec, or Linux bubblewrap / Landlock-landrun); refusing to run unconfined",
                   sandbox_unavailable: true,
                 }),
               },
