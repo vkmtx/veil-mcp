@@ -5,7 +5,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, statSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, statSync, readdirSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
@@ -25,7 +25,9 @@ const STATE_BASE = mkdtempSync(join(tmpdir(), "veil-smoke-state-"));
 process.env.VEIL_STATE_DIR = STATE_BASE;
 
 let failures = 0;
+let total = 0;
 function check(name: string, cond: boolean): void {
+  total++;
   console.log(`${cond ? "✓" : "✗"} ${name}`);
   if (!cond) failures++;
 }
@@ -89,6 +91,16 @@ check("summarizeTrace catches unfinished write line", trUnfin.wrote.includes("/t
 // effects-from-trace: cwd-scoped writes become files_changed (replaces git when tracing).
 const fxTrace = effectsFromTrace(["/work/a.txt", "/work/sub/b.txt", "/etc/passwd", "/work/a.txt"], "/work");
 check("effectsFromTrace scopes to cwd, relativizes, dedupes", fxTrace.includes("wrote a.txt") && fxTrace.includes("wrote sub/b.txt") && !fxTrace.some((l) => l.includes("passwd")) && fxTrace.length === 2);
+// effectsFromTrace canonicalizes cwd: strace records the REAL path, so a symlinked
+// root must still match (else in-cwd writes are silently dropped from files_changed).
+const realDir = realpathSync(mkdtempSync(join(tmpdir(), "veil-fxreal-")));
+const linkDir = join(tmpdir(), `veil-fxlink-${process.pid}`);
+rmSync(linkDir, { force: true });
+symlinkSync(realDir, linkDir);
+const fxSym = effectsFromTrace([join(realDir, "c.txt")], linkDir); // cwd given via the symlink
+check("effectsFromTrace matches through a symlinked cwd", fxSym.includes("wrote c.txt"));
+rmSync(linkDir, { force: true });
+rmSync(realDir, { recursive: true, force: true });
 
 // snapshot method honesty: "clone" (CoW) is claimed ONLY within one volume, so a
 // cross-device cp -cR full-copy is never mislabeled as an instant clone.
@@ -264,6 +276,10 @@ await client.connect(transport);
 const tools = (await client.listTools()).tools.map((t) => t.name);
 check("lists sh_run + sh_detail", tools.includes("sh_run") && tools.includes("sh_detail"));
 check("lists sh_history", tools.includes("sh_history"));
+// VER-1: the version advertised over the MCP handshake must equal package.json (not a
+// hardcoded literal that drifts). server.ts derives it via createRequire.
+const pkgVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+check("server handshake version == package.json", client.getServerVersion()?.version === pkgVersion);
 
 // 1) quiet success, short output returned whole
 const a = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo hello && echo world" } })));
@@ -647,9 +663,20 @@ if (sandboxAvailable()) {
   // denial is caused by deny_read, not by the sandbox itself.
   const allowed = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: `cat ${join(secretDir, "id_rsa")}`, cwd: rcWork, sandbox: true } })));
   check("plain sandbox still reads it (deny_read is the cause)", allowed.ok === true && String(allowed.stdout ?? "").includes("TOPSECRETKEY"));
+  // SECRET-DROP-1: a requested secret that exists as a FILE can't be masked by the
+  // dir-only backend — it must be DISCLOSED in secrets_unprotected, never silently
+  // dropped while secrets_protected counts only the dir.
+  const fileSecret = join(secretDir, "id_rsa"); // a FILE
+  const drop = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "true", cwd: rcWork, sandbox: { deny_read: [fileSecret, secretDir] } } })));
+  check("file-secret disclosed as unprotected (not silently dropped)", drop.secrets_protected === 1 && Array.isArray(drop.secrets_unprotected) && drop.secrets_unprotected.some((p: string) => p.includes("id_rsa")));
   rmSync(secretDir, { recursive: true, force: true });
   rmSync(rcWork, { recursive: true, force: true });
 }
+
+// ── 22c-bis) ASSERT honesty — content checks vs binary (base64) + truncated streams ──
+// Binary: stdout with a NUL is stored base64; stdout_contains must decode, not FAIL.
+const binAssert = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "printf 'abc\\000xyz'", expect: { stdout_contains: "abc" } } })));
+check("stdout_contains decodes binary (no confident-wrong fail)", binAssert.stdout_binary === true && binAssert.assert_ok === true);
 
 // ── 22d) dry-run preview (Idea 1) — runs in a clone, real cwd untouched ──
 const pvDir = mkdtempSync(join(tmpdir(), "veil-preview-"));
@@ -665,6 +692,16 @@ rmSync(pvDir, { recursive: true, force: true });
 // refuse (never run in real cwd) when the dir cannot be cloned.
 const pvBad = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo x", cwd: "/no/such/preview/dir/zzz", preview: true } })));
 check("preview refuses when cwd cannot be cloned", pvBad.preview_unavailable === true && !("ok" in pvBad));
+check("preview reports its clone method", pv.preview_method === "clone" || pv.preview_method === "rsync");
+
+// ── 22e) preview + sandbox compose: command runs in the clone, confined, real cwd untouched ──
+if (sandboxAvailable()) {
+  const psDir = mkdtempSync(join(tmpdir(), "veil-prevsbx-"));
+  writeFileSync(join(psDir, "seed.txt"), "x\n");
+  const ps = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo made > out.txt", cwd: psDir, preview: true, sandbox: true } })));
+  check("preview+sandbox: both flags surface, real cwd untouched", ps.preview === true && ps.sandboxed === true && ps.ok === true && !existsSync(join(psDir, "out.txt")));
+  rmSync(psDir, { recursive: true, force: true });
+}
 
 await client.close();
 
@@ -683,6 +720,10 @@ const truncClient = new Client({ name: "smoke-trunc", version: "0.0.0" });
 await truncClient.connect(truncTransport);
 const tr = JSON.parse(text(await truncClient.callTool({ name: "sh_run", arguments: { command: "seq 1 100000" } })));
 check("truncation sets stdout_truncated", tr.stdout_truncated === true);
+// ASSERT-TRUNC-1: a needle emitted before the byte cap is dropped from the retained
+// tail, so a stdout_contains MISS must be flagged inconclusive — not a confident fail.
+const trAssert = JSON.parse(text(await truncClient.callTool({ name: "sh_run", arguments: { command: "echo NEEDLE_AT_HEAD; seq 1 100000", expect: { stdout_contains: "NEEDLE_AT_HEAD" } } })));
+check("truncated stdout_contains miss is flagged inconclusive", trAssert.stdout_truncated === true && trAssert.assert_ok === false && Array.isArray(trAssert.assertions_failed) && trAssert.assertions_failed.some((a: string) => /truncated|inconclusive/.test(a)));
 check("truncated stdout_lines is TRUE emitted count (100000)", tr.stdout_lines === 100000);
 // The first content line must be a high tail number, NOT the dropped stream start ("1").
 const firstContent = tr.stdout.split("\n").find((l: string) => l && !l.includes("truncated at byte cap"));
@@ -782,6 +823,25 @@ rmSync(hWork, { recursive: true, force: true });
 await hC.close();
 rmSync(histDir, { recursive: true, force: true });
 
+// ── 27) protect_secrets (TEST-PROTECT) — the BUILT-IN default denylist (~/.ssh …) ──
+// Spawn a server with a fake $HOME so defaultSecretPaths() resolves there; prove a
+// read of the default ~/.ssh is denied. Without this, the default-denylist branch
+// could regress to a no-op and ship green — a FALSE security guarantee.
+if (sandboxAvailable()) {
+  const fakeHome = mkdtempSync(join(tmpdir(), "veil-home-"));
+  mkdirSync(join(fakeHome, ".ssh"));
+  writeFileSync(join(fakeHome, ".ssh", "id_rsa"), "PRIVATEKEY\n");
+  const psWork = mkdtempSync(join(tmpdir(), "veil-pswork-"));
+  const psT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, HOME: fakeHome } });
+  const psC = new Client({ name: "smoke-protect", version: "0.0.0" });
+  await psC.connect(psT);
+  const prot = JSON.parse(text(await psC.callTool({ name: "sh_run", arguments: { command: `cat ${join(fakeHome, ".ssh", "id_rsa")}`, cwd: psWork, sandbox: { protect_secrets: true } } })));
+  check("protect_secrets blocks reads of the default ~/.ssh", prot.ok === false && !String(prot.stdout ?? "").includes("PRIVATEKEY") && prot.secrets_protected >= 1);
+  await psC.close();
+  rmSync(fakeHome, { recursive: true, force: true });
+  rmSync(psWork, { recursive: true, force: true });
+}
+
 rmSync(STATE_BASE, { recursive: true, force: true });
-console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);
+console.log(failures === 0 ? `\nALL PASS (${total} assertions)` : `\n${failures}/${total} FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -44,6 +44,28 @@ function resolveIn(cwd: string, p: string): string {
   return isAbsolute(p) ? p : join(cwd, p);
 }
 
+/**
+ * The text to run a stdout/stderr content check against. A stream with NUL bytes is
+ * stored base64 (exec.ts) — decode it first so `stdout_contains "hello"` doesn't
+ * confidently FAIL on `aGVsbG8A…`. Decoding NUL-containing bytes as UTF-8 keeps each
+ * 0x00 as U+0000, so an ASCII needle is still found.
+ */
+function searchable(stored: string, binary: boolean): string {
+  return binary ? Buffer.from(stored, "base64").toString("utf8") : stored;
+}
+
+/**
+ * When a content check did NOT match AND the stream was byte-cap-truncated, the
+ * needle may have been emitted in the dropped HEAD — so a hard fail would be
+ * confidently wrong. Annotate it as inconclusive (the check still reports the
+ * tail-only result, but the agent sees it can't be trusted as a true negative).
+ */
+function inconclusiveDetail(pass: boolean, truncated: boolean): string | undefined {
+  return !pass && truncated
+    ? "stream truncated at byte cap — matched against the retained tail only; may be a false negative"
+    : undefined;
+}
+
 export function evaluate(
   exp: Expectation,
   res: ExecResult,
@@ -61,9 +83,11 @@ export function evaluate(
   }
 
   if (exp.stdout_contains !== undefined) {
+    const pass = searchable(res.stdout, res.stdoutBinary).includes(exp.stdout_contains);
     out.push({
       check: `stdout contains ${JSON.stringify(exp.stdout_contains)}`,
-      pass: res.stdout.includes(exp.stdout_contains),
+      pass,
+      detail: inconclusiveDetail(pass, res.stdoutTruncated),
     });
   }
 
@@ -71,11 +95,11 @@ export function evaluate(
     let pass = false;
     let detail: string | undefined;
     try {
-      pass = new RegExp(exp.stdout_matches).test(res.stdout);
+      pass = new RegExp(exp.stdout_matches).test(searchable(res.stdout, res.stdoutBinary));
     } catch (e) {
       detail = `invalid regex: ${String(e)}`;
     }
-    out.push({ check: `stdout matches /${exp.stdout_matches}/`, pass, detail });
+    out.push({ check: `stdout matches /${exp.stdout_matches}/`, pass, detail: detail ?? inconclusiveDetail(pass, res.stdoutTruncated) });
   }
 
   if (exp.stderr_empty !== undefined) {

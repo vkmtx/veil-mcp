@@ -303,14 +303,3 @@ export function wrapCommand(command: string, cwd: string, opts: SandboxOpts = {}
   }
   throw new Error(`sandbox not supported on platform: ${process.platform}`);
 }
-
-/** Best-effort self-check that the toolchain can actually confine (used by tests). */
-export function sandboxSelfTest(): boolean {
-  if (!sandboxAvailable()) return false;
-  try {
-    execFileSync(SANDBOX_EXEC, ["-p", "(version 1)(allow default)", "/usr/bin/true"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}

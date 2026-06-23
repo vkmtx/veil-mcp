@@ -25,23 +25,32 @@ function expandTilde(p: string): string {
   return p;
 }
 
-/** Keep only paths that exist AND are directories (deduped). The Linux read-deny
- *  masks with `--tmpfs`, which needs an existing dir; macOS deny is harmless on a
- *  missing path, so filtering to existing dirs is the safe cross-platform subset. */
-function existingDirs(paths: string[]): string[] {
+/**
+ * Partition requested secret paths into the DIRECTORIES we can actually read-confine
+ * and the existing FILES we cannot (the Linux `--tmpfs` mask needs a dir; the v1
+ * backend is dir-only). A missing path is silently ignored — there is nothing to
+ * protect. But an existing FILE that was requested is a real protection the backend
+ * can't deliver, so it is returned for DISCLOSURE rather than dropped silently — a
+ * `secrets_protected` count must never imply a named secret is safe when it isn't.
+ */
+function partitionSecrets(paths: string[]): { dirs: string[]; droppedFiles: string[] } {
   const seen = new Set<string>();
-  const out: string[] = [];
+  const dirs: string[] = [];
+  const droppedFiles: string[] = [];
   for (const raw of paths) {
     const p = expandTilde(raw);
     if (seen.has(p)) continue;
     seen.add(p);
+    let isDir: boolean;
     try {
-      if (statSync(p).isDirectory()) out.push(p);
+      isDir = statSync(p).isDirectory();
     } catch {
-      /* missing path — nothing to protect */
+      continue; // missing path — nothing to protect
     }
+    if (isDir) dirs.push(p);
+    else droppedFiles.push(p); // exists but not a dir → backend can't mask it
   }
-  return out;
+  return { dirs, droppedFiles };
 }
 
 // The "destructive command ran unconfined" nudge fires at most ONCE per server
@@ -171,6 +180,7 @@ export function registerShRun(server: McpServer): void {
       let toRun = command;
       let sandboxed = false;
       let secretsProtected = 0;
+      let secretsUnprotected: string[] = [];
       if (sandbox) {
         if (!sandboxAvailable()) {
           return {
@@ -191,7 +201,7 @@ export function registerShRun(server: McpServer): void {
             sandbox === true
               ? {}
               : (sandbox as { network?: boolean; writable?: string[]; protect_secrets?: boolean; deny_read?: string[] });
-          const denyRead = existingDirs([
+          const { dirs: denyRead, droppedFiles } = partitionSecrets([
             ...(raw.protect_secrets ? defaultSecretPaths() : []),
             ...(raw.deny_read ?? []),
           ]);
@@ -200,9 +210,15 @@ export function registerShRun(server: McpServer): void {
           toRun = wrapCommand(command, workdir, sbOpts);
           sandboxed = true;
           secretsProtected = denyRead.length;
+          secretsUnprotected = droppedFiles;
         } catch (e) {
+          // A backend that can't enforce a REQUESTED knob (e.g. Landlock + network-deny
+          // / read-confine) throws so we refuse. Surface a machine-readable flag, not
+          // just a string, mirroring the sandbox_unavailable contract.
+          const msg = String(e instanceof Error ? e.message : e);
+          const unsupported = /landlock backend cannot enforce/i.test(msg);
           return {
-            content: [{ type: "text", text: JSON.stringify({ error: String(e instanceof Error ? e.message : e) }) }],
+            content: [{ type: "text", text: JSON.stringify({ error: msg, ...(unsupported ? { sandbox_unsupported_feature: true } : {}) }) }],
             isError: true,
           };
         }
@@ -331,6 +347,9 @@ export function registerShRun(server: McpServer): void {
       if (res.stderrBinary) result.stderr_binary = true;
       if (sandboxed) result.sandboxed = true;
       if (secretsProtected) result.secrets_protected = secretsProtected;
+      // Honesty: a requested secret path that exists as a FILE can't be masked by the
+      // dir-only backend — disclose it so secrets_protected is never read as "all safe".
+      if (secretsUnprotected.length) result.secrets_unprotected = secretsUnprotected;
       if (previewClone) {
         result.preview = true;
         result.preview_method = previewClone.method;
@@ -338,6 +357,7 @@ export function registerShRun(server: McpServer): void {
         result.preview_warning =
           "ran in a disposable CoW clone of cwd; changes are cwd-RELATIVE only. " +
           "Absolute-path, parent-dir, and network effects are NOT captured and may have happened for REAL. " +
+          "Changes under .git are excluded from the diff (so a previewed commit shows no files_changed). " +
           "Nothing was promoted to the real cwd. This is not a sandbox — add sandbox:true for containment.";
       }
       if (traceSummary) result.trace_summary = traceSummary;
