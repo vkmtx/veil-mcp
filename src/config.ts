@@ -4,7 +4,10 @@ function num(name: string, def: number): number {
   const v = process.env[name];
   if (v === undefined) return def;
   const n = Number(v);
-  return Number.isFinite(n) ? n : def;
+  // Floor at 0: every tunable here is a count / size / duration where a negative is
+  // meaningless and would misbehave downstream (a negative head/tail slice, etc.).
+  // 0 stays 0 — it has meaning for several (no timeout, unbounded cap/records).
+  return Number.isFinite(n) ? Math.max(0, n) : def;
 }
 
 function bool(name: string, def: boolean): boolean {

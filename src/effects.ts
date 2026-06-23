@@ -26,7 +26,15 @@ export function gitStatus(cwd: string): Set<string> | null {
  * skip the two git calls entirely when tracing. Paths are reported cwd-relative.
  */
 export function effectsFromTrace(wrote: string[], cwd: string): string[] {
-  const root = resolve(cwd);
+  // strace records CANONICAL (realpath'd) paths, so match on the canonical cwd —
+  // else a symlinked root (/tmp→/private/tmp, /var→/run, symlinked $HOME) drops real
+  // in-cwd writes from files_changed. cloneDiff canonicalizes for the same reason.
+  let root: string;
+  try {
+    root = realpathSync(cwd);
+  } catch {
+    root = resolve(cwd);
+  }
   const out: string[] = [];
   const seen = new Set<string>();
   for (const p of wrote) {
@@ -127,9 +135,10 @@ export function diffStatus(
     // revert/deletion — skip it so we don't emit a phantom "(reverted)".
     if (afterPaths.has(porcelainPath(line))) continue;
     const t = line.trim();
-    // Otherwise: an untracked file that vanished was DELETED, not rolled back;
-    // a tracked change that vanished was reverted.
-    changed.push(t.startsWith("??") ? `deleted (untracked) ${porcelainPath(line)}` : `(reverted) ${t}`);
+    // Otherwise: an untracked file that vanished was DELETED. A tracked change that
+    // vanished is no longer dirty — but porcelain can't tell a `git add`/commit from
+    // a real revert, so label it honestly rather than asserting "reverted".
+    changed.push(t.startsWith("??") ? `deleted (untracked) ${porcelainPath(line)}` : `no longer dirty (committed or reverted): ${t}`);
   }
   return changed;
 }

@@ -23,7 +23,7 @@
 
 import { createHash } from "node:crypto";
 import {
-  mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, renameSync, openSync, closeSync, chmodSync,
+  mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, unlinkSync, renameSync, openSync, closeSync, chmodSync, existsSync,
 } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -138,7 +138,14 @@ export function nextId(): string {
           counter++;
           continue;
         }
-        break; // other I/O error → fall back to in-memory id (record still cached)
+        // Other I/O error (disk full, perms): we can't reserve a lock. But never hand
+        // back an id whose record file ALREADY exists — put()'s rename would clobber a
+        // peer's record. Skip taken slots, then fall back to the un-reserved id.
+        if (existsSync(recordPath(`cmd${counter}`))) {
+          counter++;
+          continue;
+        }
+        break; // fall back to in-memory id (record still cached)
       }
     }
   }
@@ -185,12 +192,15 @@ function evict(): void {
       records.delete(f.slice(0, -5));
       try { unlinkSync(join(dir, f)); } catch { /* already gone */ }
     }
-  } else {
-    while (records.size > config.maxRecords) {
-      const oldest = records.keys().next().value;
-      if (oldest === undefined) break;
-      records.delete(oldest);
-    }
+  }
+  // Memory backstop — ALWAYS cap the in-memory Map, even with a disk store. Records
+  // whose disk write failed (a flaky/again-read-only dir) are in `records` but not on
+  // disk, so the disk evictor above never trims them and the Map would grow unbounded.
+  // Trimming a still-on-disk entry is safe: get() re-reads from disk and re-caches.
+  while (records.size > config.maxRecords) {
+    const oldest = records.keys().next().value;
+    if (oldest === undefined) break;
+    records.delete(oldest);
   }
 }
 

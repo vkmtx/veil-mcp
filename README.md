@@ -122,7 +122,7 @@ sh_detail { "id": "cmd9", "selector": "stdout", "match": "ERROR|version=" }
 
 `id`, `exit`, `ok`, `ms`; then `attempts`, `stdout_lines`/`stderr_lines` (TRUE emitted
 counts), `files_changed`, `timed_out`, `stdout_truncated`/`stderr_truncated`,
-`stdout_binary`/`stderr_binary`, `sandboxed`, `secrets_protected`,
+`stdout_binary`/`stderr_binary`, `sandboxed`, `secrets_protected`/`secrets_unprotected`,
 `preview`/`preview_method`/`preview_warning`, `trace_summary`/`trace_unavailable`,
 `assert_ok`/`assertions_failed`, `advice`, `hint`, and the condensed `stdout`/`stderr`.
 
@@ -140,7 +140,7 @@ counts), `files_changed`, `timed_out`, `stdout_truncated`/`stderr_truncated`,
 | `VEIL_TIMEOUT_MS` | 120000 | default per-command timeout (0 = none) |
 | `VEIL_MAX_STREAM_BYTES` | 5000000 | max bytes stored per stream (older dropped) |
 | `VEIL_MAX_RECORDS` | 500 | max addressable run records (oldest evicted) |
-| `VEIL_STATE_DIR` | auto | record store base (`$XDG_STATE_HOME/veil` → `~/.local/state/veil` → `$TMPDIR/veil`). `none`/`off` = memory-only |
+| `VEIL_STATE_DIR` | auto | record store base (`$XDG_STATE_HOME/veil` → `~/.local/state/veil` → `$TMPDIR/veil`). `none`/`off`/`memory`/`0` = memory-only |
 | `VEIL_RECORD_TTL_MS` | 86400000 | persisted records older than this are pruned on boot (0 = keep) |
 | `VEIL_EFFECTS` | true | compute the git effect-diff (set `0` to skip in huge repos) |
 
@@ -220,7 +220,7 @@ Don't take the numbers on trust — no account, all local:
 
 ```bash
 git clone https://github.com/vkmtx/veil-mcp && cd veil-mcp && npm install
-npm test          # 228 smoke assertions over a live stdio server (some platform-gated)
+npm test          # 270+ smoke assertions over a live stdio server (prints its tally; some platform-gated)
 npm run metrics   # the value numbers below
 npm run backtest  # byte-savings regression (bulk-condense ratio + per-command overhead floor)
 npm run bench     # detailed 5-dimension benchmark (economy, latency, per-feature, condense, session)
@@ -276,5 +276,5 @@ MIT — see [LICENSE](LICENSE).
 ---
 
 *v0.5 — experimental, single-author. A security + honesty **hardening pass**
-([CHANGELOG](CHANGELOG.md)): 228 smoke assertions + backtest + value metrics, green on
+([CHANGELOG](CHANGELOG.md)): 270+ smoke assertions + backtest + value metrics, green on
 macOS and Linux CI. Judge it by the reproducible suite above, not its age.*

@@ -34,6 +34,25 @@ Three scoped capabilities, each shipping only what its substrate can honestly ba
   self-test runs a real confined no-op (no `--best-effort`) so an unsupported kernel
   reports unavailable instead of silently running free.
 
+### Fixed (audit pass)
+- **`expect` content checks no longer lie on binary/truncated output.**
+  `stdout_contains`/`stdout_matches` decode a base64 (NUL-byte) stream before testing,
+  and a non-match on a byte-cap-truncated stream is annotated *inconclusive* (the
+  needle may be in the dropped head) instead of a confident `pass:false`.
+- **`effectsFromTrace` canonicalizes cwd** — a symlinked root (`/tmp`→`/private/tmp`,
+  symlinked `$HOME`) no longer silently drops real in-cwd writes from `files_changed`.
+- **Read-confine discloses what it can't protect.** A requested secret that exists as a
+  FILE (the dir-only backend can't mask it) is surfaced in `secrets_unprotected` rather
+  than silently dropped while `secrets_protected` counts only the dirs.
+- **Server version is read from package.json** (was hardcoded `0.4.0`, drifting a full
+  minor behind), asserted equal in the smoke suite.
+- **Landlock knob-refusal is machine-readable** (`sandbox_unsupported_feature: true`).
+- Eviction has a memory backstop (records that never reached a flaky disk can't grow
+  unbounded); `nextId` won't hand back an id whose record file already exists; numeric
+  env tunables are floored at 0; a committed-then-clean file is labelled "no longer
+  dirty (committed or reverted)" instead of asserting "(reverted)"; the preview banner
+  notes `.git` changes are excluded from its diff. Removed dead `sandboxSelfTest`.
+
 ## [0.5.0] — 2026-06-22
 
 Skeptic-review hardening pass: fix a critical checkpoint-label vulnerability,
