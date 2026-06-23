@@ -3,10 +3,11 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
-## [Unreleased]
+## [0.6.0] — 2026-06-23
 
-Three scoped capabilities, each shipping only what its substrate can honestly back
-(no headline that the kernel or the stored data can't keep).
+Four scoped capabilities, each shipping only what its substrate can honestly back
+(no headline that the kernel or the stored data can't keep), plus a guard-hook
+refresh and an honesty/correctness audit pass.
 
 ### Added
 - **Secret read-confine.** `sandbox` gains `{ protect_secrets: true }` (built-in
@@ -33,6 +34,12 @@ Three scoped capabilities, each shipping only what its substrate can honestly ba
   caller refuses) network-deny / secret-read-confine rather than fake them, and its
   self-test runs a real confined no-op (no `--best-effort`) so an unsupported kernel
   reports unavailable instead of silently running free.
+- **Guard hook covers modern verbose tools.** `hooks/veil-guard.sh` now routes
+  `bun`/`deno`/`uv` (install/add/run/test/build/sync) and image builds
+  (`docker build`/`buildx`/`compose build`/`docker-compose build`) to `sh_run`, while
+  read-only (`docker ps`/`logs`) and long-running (`bun run dev`, `docker compose up`,
+  `* --watch`) forms still pass through to raw Bash. Danger branch, fail-open, and
+  `VEIL_BYPASS=1` are unchanged.
 
 ### Fixed (audit pass)
 - **`expect` content checks no longer lie on binary/truncated output.**

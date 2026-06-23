@@ -1,6 +1,6 @@
 {
   "name": "veil-mcp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Agent-native shell as an MCP server — quiet-by-default, addressable detail, effects-as-data, opt-in sandbox/trace. Built for LLM agents (Claude Code), not humans at a terminal.",
   "type": "module",
   "bin": {
