@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
 import { extractSignals } from "../src/signals.js";
 import { diffStatus, effectsFromTrace } from "../src/effects.js";
-import { sandboxAvailable, buildProfile, buildBwrapArgs } from "../src/policy.js";
+import { sandboxAvailable, buildProfile, buildBwrapArgs, defaultSecretPaths } from "../src/policy.js";
 import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
 import { runInit } from "../src/init.js";
@@ -199,6 +199,18 @@ let dqThrew = false;
 try { buildProfile("/tmp/x", { writable: ['/bad"q'] }); } catch { dqThrew = true; }
 check("profile rejects double-quote path", dqThrew);
 
+// read-confine (Idea 2 — secret-path denylist): profile/arg shape + defaults.
+const profRC = buildProfile("/tmp/x", { denyRead: ["/home/u/.ssh", "/home/u/.aws"] });
+check("profile denies reads of secret subpaths", profRC.includes("(deny file-read*") && profRC.includes("/home/u/.ssh") && profRC.includes("/home/u/.aws"));
+check("profile omits read-deny when none requested", !buildProfile("/tmp/x", {}).includes("(deny file-read*"));
+const bwRC = buildBwrapArgs("echo x", "/tmp/w", { denyRead: ["/home/u/.ssh"] });
+check("bwrap masks secret dir with tmpfs", bwRC.includes("--tmpfs") && bwRC.includes("/home/u/.ssh"));
+check("bwrap omits tmpfs when no secrets", !buildBwrapArgs("echo x", "/tmp/w", {}).includes("--tmpfs"));
+let rcThrew = false;
+try { buildProfile("/tmp/x", { denyRead: ["/bad'quote"] }); } catch { rcThrew = true; }
+check("profile rejects unsafe denyRead path", rcThrew);
+check("defaultSecretPaths includes ssh + aws dirs", defaultSecretPaths().some((p) => p.endsWith("/.ssh")) && defaultSecretPaths().some((p) => p.endsWith("/.aws")));
+
 // interactive-command detector (advisory only).
 check("looksInteractive flags editor", looksInteractive("vim file.txt") === true);
 check("looksInteractive flags bare REPL", looksInteractive("python") === true && looksInteractive("python script.py") === false);
@@ -238,6 +250,7 @@ await client.connect(transport);
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
 check("lists sh_run + sh_detail", tools.includes("sh_run") && tools.includes("sh_detail"));
+check("lists sh_history", tools.includes("sh_history"));
 
 // 1) quiet success, short output returned whole
 const a = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo hello && echo world" } })));
@@ -609,6 +622,37 @@ if (process.platform === "darwin" && sandboxAvailable()) {
   check("sandbox unavailable refuses to run", unavail.sandbox_unavailable === true);
 }
 
+// ── 22c) read-confine (Idea 2) — block reads of a configured secret-path list ──
+if (sandboxAvailable()) {
+  const secretDir = mkdtempSync(join(tmpdir(), "veil-secret-"));
+  writeFileSync(join(secretDir, "id_rsa"), "TOPSECRETKEY\n");
+  const rcWork = mkdtempSync(join(tmpdir(), "veil-rcwork-"));
+  // The secret read is DENIED when the dir is on the deny_read list…
+  const blocked = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: `cat ${join(secretDir, "id_rsa")}`, cwd: rcWork, sandbox: { deny_read: [secretDir] } } })));
+  check("read-confine blocks the secret read", blocked.ok === false && !String(blocked.stdout ?? "").includes("TOPSECRETKEY") && blocked.secrets_protected === 1);
+  // …but the SAME read succeeds under a plain write-confine sandbox — proving the
+  // denial is caused by deny_read, not by the sandbox itself.
+  const allowed = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: `cat ${join(secretDir, "id_rsa")}`, cwd: rcWork, sandbox: true } })));
+  check("plain sandbox still reads it (deny_read is the cause)", allowed.ok === true && String(allowed.stdout ?? "").includes("TOPSECRETKEY"));
+  rmSync(secretDir, { recursive: true, force: true });
+  rmSync(rcWork, { recursive: true, force: true });
+}
+
+// ── 22d) dry-run preview (Idea 1) — runs in a clone, real cwd untouched ──
+const pvDir = mkdtempSync(join(tmpdir(), "veil-preview-"));
+writeFileSync(join(pvDir, "keep.txt"), "original\n");
+writeFileSync(join(pvDir, "a and b.txt"), "v1\n"); // name contains " and " — exercises the differ parse
+const pv = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: 'echo NEW > added.txt && rm keep.txt && echo more >> "a and b.txt"', cwd: pvDir, preview: true } })));
+check("preview flagged + warns it is not a sandbox", pv.preview === true && typeof pv.preview_warning === "string" && pv.preview_warning.includes("not a sandbox"));
+check("preview reports cwd-relative created + deleted", Array.isArray(pv.files_changed) && pv.files_changed.some((l: string) => l.includes("created") && l.includes("added.txt")) && pv.files_changed.some((l: string) => l.includes("deleted") && l.includes("keep.txt")));
+check("preview parses modified file whose name contains ' and '", pv.files_changed.some((l: string) => l === "modified a and b.txt"));
+check("preview leaves the REAL cwd untouched", existsSync(join(pvDir, "keep.txt")) && !existsSync(join(pvDir, "added.txt")) && readFileSync(join(pvDir, "a and b.txt"), "utf8") === "v1\n");
+check("preview command actually ran (real exit)", pv.ok === true);
+rmSync(pvDir, { recursive: true, force: true });
+// refuse (never run in real cwd) when the dir cannot be cloned.
+const pvBad = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo x", cwd: "/no/such/preview/dir/zzz", preview: true } })));
+check("preview refuses when cwd cannot be cloned", pvBad.preview_unavailable === true && !("ok" in pvBad));
+
 await client.close();
 
 // ── 22c) store permissions: persisted records are OWNER-ONLY (no secret leak on
@@ -697,6 +741,33 @@ const noFxForced = JSON.parse(text(await noFxC.callTool({ name: "sh_run", argume
 check("changed assertion still forces effect-diff when effects off", noFxForced.assert_ok === true);
 rmSync(fxRepo, { recursive: true, force: true });
 await noFxC.close();
+
+// ── 26) sh_history (Idea 3) — DESCRIPTIVE aggregates over past runs ──
+const histDir = mkdtempSync(join(tmpdir(), "veil-hist-state-"));
+const hT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_STATE_DIR: histDir } });
+const hC = new Client({ name: "smoke-hist", version: "0.0.0" });
+await hC.connect(hT);
+const hWork = mkdtempSync(join(tmpdir(), "veil-hist-work-"));
+// three identical successful runs → one group, n=3.
+for (let i = 0; i < 3; i++) await hC.callTool({ name: "sh_run", arguments: { command: "echo hi", cwd: hWork } });
+const hist = JSON.parse(text(await hC.callTool({ name: "sh_history", arguments: { command: "echo hi" } })));
+check("sh_history groups exact command with n", hist.groups.length === 1 && hist.groups[0].n === 3 && hist.groups[0].command === "echo hi");
+check("sh_history reports exit0 + duration percentiles", hist.groups[0].exit0 === 3 && hist.groups[0].nonzero === 0 && typeof hist.groups[0].duration_ms.p50 === "number");
+check("sh_history reports recency window", typeof hist.groups[0].window.first === "string" && typeof hist.groups[0].window.span_h === "number");
+check("sh_history is descriptive (note, no prediction)", typeof hist.note === "string" && hist.note.includes("descriptive") && !JSON.stringify(hist).includes("likely"));
+// a retry-recovering run is reported as recovered N/M.
+const flagH = join(hWork, "flagH");
+const retCmd = `test -f ${flagH} && echo ok || (touch ${flagH}; exit 1)`;
+const rh = JSON.parse(text(await hC.callTool({ name: "sh_run", arguments: { command: retCmd, cwd: hWork, retries: 1 } })));
+check("retry-recovering run succeeded on 2nd attempt", rh.ok === true && rh.attempts === 2);
+const histRet = JSON.parse(text(await hC.callTool({ name: "sh_history", arguments: { command: retCmd } })));
+check("sh_history surfaces retry recovery", histRet.groups[0].retried === "recovered 1/1");
+// like-filter matches the echo group.
+const histLike = JSON.parse(text(await hC.callTool({ name: "sh_history", arguments: { like: "echo hi" } })));
+check("sh_history like-filter matches the group", histLike.matched === 3 && histLike.groups.some((g: any) => g.command === "echo hi"));
+rmSync(hWork, { recursive: true, force: true });
+await hC.close();
+rmSync(histDir, { recursive: true, force: true });
 
 rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILED`);

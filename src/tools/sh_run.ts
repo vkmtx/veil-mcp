@@ -4,18 +4,45 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { config } from "../config.js";
 import { runWithRetry } from "../exec.js";
-import { gitStatus, diffStatus, effectsFromTrace } from "../effects.js";
+import { gitStatus, diffStatus, effectsFromTrace, cloneDiff } from "../effects.js";
 import { condense, lineCount } from "../render.js";
 import { nextId, put } from "../store.js";
 import { evaluate, type Expectation } from "../assert.js";
-import { sandboxAvailable, wrapCommand, type SandboxOpts } from "../policy.js";
+import { sandboxAvailable, wrapCommand, defaultSecretPaths, type SandboxOpts } from "../policy.js";
+import { cloneForPreview, dropPreview, type PreviewClone } from "../snapshot.js";
 import { classify, looksInteractive } from "../classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace, type TraceSummary } from "../trace.js";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 const pathOrPaths = z.union([z.string(), z.array(z.string())]);
+
+/** Expand a leading `~`/`~/` to $HOME so secret paths can be given tilde-style. */
+function expandTilde(p: string): string {
+  if (p === "~") return homedir();
+  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+  return p;
+}
+
+/** Keep only paths that exist AND are directories (deduped). The Linux read-deny
+ *  masks with `--tmpfs`, which needs an existing dir; macOS deny is harmless on a
+ *  missing path, so filtering to existing dirs is the safe cross-platform subset. */
+function existingDirs(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of paths) {
+    const p = expandTilde(raw);
+    if (seen.has(p)) continue;
+    seen.add(p);
+    try {
+      if (statSync(p).isDirectory()) out.push(p);
+    } catch {
+      /* missing path — nothing to protect */
+    }
+  }
+  return out;
+}
 
 // The "destructive command ran unconfined" nudge fires at most ONCE per server
 // process — a one-time hint, not per-command noise on routine `rm -rf build` calls.
@@ -72,13 +99,32 @@ export function registerShRun(server: McpServer): void {
             z.object({
               network: z.boolean().optional(),
               writable: z.array(z.string()).optional(),
+              protect_secrets: z
+                .boolean()
+                .optional()
+                .describe("Also block reads of a built-in secret-dir denylist (~/.ssh, ~/.aws, ~/.gnupg, ~/.config/gcloud|gh, ~/.kube, ~/.docker)."),
+              deny_read: z
+                .array(z.string())
+                .optional()
+                .describe("Extra existing DIRECTORIES whose reads are blocked under the sandbox (tilde ok)."),
             }),
           ])
           .optional()
           .describe(
-            "Run under a real OS sandbox (macOS sandbox-exec): file writes confined to cwd + temp. " +
-              "Pass {network:false} to also deny network, {writable:[...]} for extra writable paths. " +
+            "Run under a real OS sandbox (macOS sandbox-exec / Linux bubblewrap): file writes confined to cwd + temp. " +
+              "Pass {network:false} to deny network, {writable:[...]} for extra writable paths, " +
+              "{protect_secrets:true} or {deny_read:[...]} to BLOCK READS of configured secret dirs (scoped — " +
+              "blocks the listed paths, NOT a proof against all exfiltration). " +
               "REFUSES to run (does not execute unconfined) if a sandbox is unavailable.",
+          ),
+        preview: z
+          .boolean()
+          .optional()
+          .describe(
+            "Dry-run in a disposable CoW clone of cwd: the command runs INSIDE the clone, you get the " +
+              "cwd-relative file diff, and the real cwd is never touched (nothing is promoted). " +
+              "Honest scope: absolute-path / parent-dir / network effects are NOT captured and may happen for " +
+              "real — this is NOT a sandbox (combine with sandbox:true for containment). Refuses if cwd can't be cloned.",
           ),
         trace: z
           .boolean()
@@ -90,13 +136,41 @@ export function registerShRun(server: McpServer): void {
           ),
       },
     },
-    async ({ command, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace }) => {
-      const workdir = cwd ?? process.cwd();
+    async ({ command, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview }) => {
+      const origin = cwd ?? process.cwd();
+      let workdir = origin;
 
+      // Dry-run preview — clone cwd and run INSIDE the clone so the real cwd is never
+      // touched. Honesty contract: if the clone can't be made, REFUSE — never silently
+      // fall back to running in the real cwd.
+      let previewClone: PreviewClone | null = null;
+      if (preview) {
+        previewClone = cloneForPreview(origin);
+        if (!previewClone) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "preview requested but the working dir could not be cloned; refusing to run in the real cwd",
+                  preview_unavailable: true,
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        workdir = previewClone.path;
+      }
+
+      // From here, a finally drops the preview clone on EVERY exit (return or throw),
+      // so a disposable clone can never leak — even if a later step throws.
+      try {
       // Feature K — real sandbox. Wrap the command for kernel-level confinement.
       // Honesty contract: if confinement is unavailable, refuse rather than run free.
       let toRun = command;
       let sandboxed = false;
+      let secretsProtected = 0;
       if (sandbox) {
         if (!sandboxAvailable()) {
           return {
@@ -104,7 +178,7 @@ export function registerShRun(server: McpServer): void {
               {
                 type: "text",
                 text: JSON.stringify({
-                  error: "sandbox requested but unavailable (needs macOS sandbox-exec); refusing to run unconfined",
+                  error: "sandbox requested but unavailable (needs macOS sandbox-exec or Linux bubblewrap); refusing to run unconfined",
                   sandbox_unavailable: true,
                 }),
               },
@@ -113,8 +187,19 @@ export function registerShRun(server: McpServer): void {
           };
         }
         try {
-          toRun = wrapCommand(command, workdir, sandbox === true ? {} : (sandbox as SandboxOpts));
+          const raw =
+            sandbox === true
+              ? {}
+              : (sandbox as { network?: boolean; writable?: string[]; protect_secrets?: boolean; deny_read?: string[] });
+          const denyRead = existingDirs([
+            ...(raw.protect_secrets ? defaultSecretPaths() : []),
+            ...(raw.deny_read ?? []),
+          ]);
+          const sbOpts: SandboxOpts = { network: raw.network, writable: raw.writable };
+          if (denyRead.length) sbOpts.denyRead = denyRead;
+          toRun = wrapCommand(command, workdir, sbOpts);
           sandboxed = true;
+          secretsProtected = denyRead.length;
         } catch (e) {
           return {
             content: [{ type: "text", text: JSON.stringify({ error: String(e instanceof Error ? e.message : e) }) }],
@@ -156,8 +241,10 @@ export function registerShRun(server: McpServer): void {
       const retrySpec = { retries: retries ?? 0, retryOnExit: retry_on_exit, backoffMs: backoff_ms };
       // Effect source: when tracing, the trace IS the effect list — skip the two git
       // status calls entirely (cheaper than scanning the worktree, and more precise).
+      // Preview derives effects from a clone-vs-origin tree diff (below), so it never
+      // takes git snapshots of the (cloned) workdir.
       const useTrace = traceDir !== undefined;
-      const before = !useTrace && trackEffects ? gitStatus(workdir) : null;
+      const before = !previewClone && !useTrace && trackEffects ? gitStatus(workdir) : null;
       let res = await runWithRetry(toRun, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec);
 
       // Trace reconciliation — BEFORE computing effects so files_changed reflects the
@@ -187,7 +274,12 @@ export function registerShRun(server: McpServer): void {
       }
 
       let filesChanged: string[] | null;
-      if (useTrace) {
+      if (previewClone) {
+        // The command ran in the clone — report how the clone diverged from origin
+        // (cwd-relative writes only). The clone is dropped after asserts, since
+        // expect.file_exists/file_absent must still resolve against it.
+        filesChanged = cloneDiff(origin, previewClone.path);
+      } else if (useTrace) {
         // Trace ran → derive effects from what it actually wrote (cwd-scoped). If the
         // trace failed to capture, there are no git snapshots to fall back to → null.
         filesChanged = traceSummary ? effectsFromTrace(traceSummary.wrote, workdir) : null;
@@ -200,7 +292,8 @@ export function registerShRun(server: McpServer): void {
       put({
         id,
         command,
-        cwd: workdir,
+        cwd: origin,
+        at: Date.now(),
         exit: res.exit,
         durationMs: res.durationMs,
         timedOut: res.timedOut,
@@ -237,6 +330,16 @@ export function registerShRun(server: McpServer): void {
       if (res.stdoutBinary) result.stdout_binary = true;
       if (res.stderrBinary) result.stderr_binary = true;
       if (sandboxed) result.sandboxed = true;
+      if (secretsProtected) result.secrets_protected = secretsProtected;
+      if (previewClone) {
+        result.preview = true;
+        result.preview_method = previewClone.method;
+        // Hard honesty banner: the diff above is cwd-relative ONLY; this is not a sandbox.
+        result.preview_warning =
+          "ran in a disposable CoW clone of cwd; changes are cwd-RELATIVE only. " +
+          "Absolute-path, parent-dir, and network effects are NOT captured and may have happened for REAL. " +
+          "Nothing was promoted to the real cwd. This is not a sandbox — add sandbox:true for containment.";
+      }
       if (traceSummary) result.trace_summary = traceSummary;
       if (traceUnavailable) result.trace_unavailable = true;
 
@@ -298,15 +401,19 @@ export function registerShRun(server: McpServer): void {
       // that an interactive/TTY command won't behave under buffered, TTY-less exec.
       if (sandboxed && !ok && /not permitted/i.test(res.stderr)) {
         result.advice = "sandbox denied an operation — add the path to sandbox.writable, set network:true, or run without sandbox";
-      } else if (cls.category === "destructive" && !sandboxed && !destructiveNudged) {
+      } else if (cls.category === "destructive" && !sandboxed && !previewClone && !destructiveNudged) {
         destructiveNudged = true; // once per process — don't nag on every rm
         result.advice = "destructive command ran unconfined — consider sandbox:true or sh_checkpoint to limit blast radius";
       } else if (looksInteractive(command)) {
         result.advice = "looks interactive/TTY-bound — sh_run buffers output and has no TTY; use raw Bash for interactive sessions";
       }
 
-      // Compact JSON — the consumer is an LLM, not a human reader; bytes are tokens.
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+        // Compact JSON — the consumer is an LLM, not a human reader; bytes are tokens.
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      } finally {
+        // Preview clone has served its purpose (effects + asserts read against it).
+        if (previewClone) dropPreview(previewClone.path);
+      }
     },
   );
 }

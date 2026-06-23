@@ -194,6 +194,37 @@ function evict(): void {
   }
 }
 
+/**
+ * All known run records, newest first by `at` (then id). Reads the memory cache AND
+ * every cmdN.json on disk (de-duped by id, re-caching disk hits), so sh_history sees
+ * runs from earlier sessions too. Best-effort: an unreadable/absent dir just yields
+ * the in-memory set. Bounded by the same VEIL_MAX_RECORDS eviction as the store.
+ */
+export function all(): RunRecord[] {
+  const byId = new Map<string, RunRecord>(records);
+  if (dir) {
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!/^cmd\d+\.json$/.test(f)) continue;
+        const id = f.slice(0, -5);
+        if (byId.has(id)) continue;
+        try {
+          const raw = readFileSync(join(dir, f), "utf8");
+          if (!raw) continue;
+          const rec = JSON.parse(raw) as RunRecord;
+          byId.set(id, rec);
+          records.set(id, rec);
+        } catch {
+          /* partial/unparseable record — skip */
+        }
+      }
+    } catch {
+      /* unreadable dir — memory set only */
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => (b.at ?? 0) - (a.at ?? 0) || idNum(b.id) - idNum(a.id));
+}
+
 export function get(id: string): RunRecord | undefined {
   const cached = records.get(id);
   if (cached) return cached;

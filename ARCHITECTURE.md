@@ -36,20 +36,21 @@ evaluate `assert`, and store the record for `sh_detail`.
 | `config.ts`          | Env-overridable tunables (limits, timeout).                 |
 | `types.ts`           | Shared `ExecResult` / `RunRecord`.                          |
 | `exec.ts`            | Spawn; enforce timeout; bound buffering; declarative retry. |
-| `effects.ts`         | git porcelain before/after diff; or effects derived from a trace (skips git). |
+| `effects.ts`         | git porcelain before/after diff; or effects derived from a trace (skips git); `cloneDiff` (clone-vs-origin tree diff for `preview`). |
 | `render.ts`          | Token-aware condensing (head+tail+pointer); truncation-aware; CR-normalized line counting. |
 | `signals.ts`         | Content-aware extraction of FAIL/error/warn lines from the hidden middle. |
-| `store.ts`           | Addressable record store — memory cache + per-project disk persistence (survives restart), atomic id reservation, TTL prune + `VEIL_MAX_RECORDS` eviction; best-effort (degrades to memory-only). |
+| `store.ts`           | Addressable record store — memory cache + per-project disk persistence (survives restart), atomic id reservation, TTL prune + `VEIL_MAX_RECORDS` eviction; best-effort (degrades to memory-only). `all()` scans every record for `sh_history`. |
 | `init.ts`            | `veil init` — idempotent per-project `CLAUDE.md` nudge writer + setup steps. |
 | `assert.ts`          | Post-condition evaluator (`expect`).                        |
 | `classify.ts`        | Static command classification (blast radius + mutations); top-level pipeline/list decomposed per-segment, worst case aggregated. |
-| `policy.ts`          | Real sandbox enforcement (macOS sandbox-exec SBPL; Linux bubblewrap). |
+| `policy.ts`          | Real sandbox enforcement (macOS sandbox-exec SBPL; Linux bubblewrap). Write-confine + optional network-deny + **read-confine** of a secret-dir denylist (`deny file-read*` / `--tmpfs` mask). |
 | `trace.ts`           | Structured syscall/FS trace (Linux strace) + read/write summarizer. |
-| `snapshot.ts`        | Checkpoint/restore — APFS CoW clone (`cp -c`) or rsync mirror; origin-dir guard. |
-| `tools/sh_run.ts`    | Compose exec+effects+render+store+assert+retry.             |
+| `snapshot.ts`        | Checkpoint/restore — APFS CoW clone (`cp -c`) or rsync mirror; origin-dir guard. `cloneForPreview` makes a full disposable clone for `preview` runs. |
+| `tools/sh_run.ts`    | Compose exec+effects+render+store+assert+retry; read-confine + preview wiring. |
 | `tools/sh_detail.ts` | Pull stored slices by id.                                   |
 | `tools/sh_plan.ts`   | Static safety pre-check via `classify`, no execution.       |
 | `tools/sh_snapshot.ts` | `sh_checkpoint` / `sh_restore` / `sh_checkpoints`.        |
+| `tools/sh_history.ts` | Descriptive aggregates over past runs (observed, with `n` + recency window). |
 | `server.ts`/`index.ts` | Build + boot over stdio; `index.ts` also dispatches `veil init`. |
 
 ## Feature → module map
@@ -68,6 +69,9 @@ evaluate `assert`, and store the record for `sh_detail`.
 | **B / K-lite** static safety pre-check + blast-radius (segment-aware; not an execution dry-run) | done | `classify.ts` (`splitSegments`/`aggregate`/`classifyAtom`) + `tools/sh_plan.ts` |
 | **C** checkpoint / rollback     | done   | `snapshot.ts` (APFS clone / rsync fallback) + `tools/sh_snapshot.ts` |
 | **K** sandbox enforcement       | done (macOS) | `policy.ts` (sandbox-exec SBPL) + `sh_run` `sandbox` |
+| **K-read** secret read-confine  | done (macOS; Linux via `--tmpfs`) | `policy.ts` (`denyRead` → `deny file-read*` / `--tmpfs`) + `sh_run` `sandbox.protect_secrets`/`deny_read` |
+| **P** dry-run preview (CoW clone, real cwd untouched) | done | `snapshot.ts` `cloneForPreview` + `effects.ts` `cloneDiff` + `sh_run` `preview` |
+| **HIST** descriptive run history | done | `store.ts` `all()` + `tools/sh_history.ts` (+ `at` timestamp on `RunRecord`) |
 | **C+** atomic CoW checkpoints   | done (macOS) | `snapshot.ts` APFS `clonefile` (`cp -c`) + rsync fallback |
 | **K+** Linux sandbox backend    | experimental | `policy.ts` `buildBwrapArgs` (bubblewrap); arg-builder unit-tested, live write-confine covered by a Linux CI test (`test/smoke.ts`, Ubuntu leg) |
 | **A** structured trace          | experimental | `trace.ts` (strace summarizer, best-effort) + `sh_run` `trace`; capture validated on Linux CI |
@@ -80,6 +84,14 @@ evaluate `assert`, and store the record for `sh_detail`.
   Those require copy-on-write snapshots and seccomp/landlock — separate lower
   layers this server would *drive*, not implement. A zsh fork couldn't do them
   either; they don't live in the shell.
+- **Scoped, not absolute** (honesty over headline): `preview` is a **cwd-relative**
+  CoW dry-run — the command runs in a clone, so cwd-local writes are captured and
+  reversible, but absolute-path / parent-dir / network effects escape to the real
+  system and are NOT shown. It is explicitly *not* whole-FS isolation; the result
+  banners this. `sandbox.deny_read`/`protect_secrets` blocks reads of the **listed**
+  secret paths — a real kernel deny for those paths, not a proof against all
+  exfiltration (a process can still leak via an allowed path or covert channel).
+  Both surface exactly what they guarantee and nothing more.
 
 ## Invariants
 

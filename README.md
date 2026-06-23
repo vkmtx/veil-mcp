@@ -74,6 +74,7 @@ touches only `CLAUDE.md` — see [Adoption](#adoption).
 | **`sh_plan`** | Predict a command's blast radius (read-only → destructive) **without running it**. |
 | **`sh_checkpoint` / `sh_restore`** | Snapshot a directory and roll back. Restore refuses a target dir different from where the checkpoint was taken. |
 | **`sh_checkpoints`** | List checkpoint labels. |
+| **`sh_history`** | Descriptive aggregates over past runs of a command — observed exit / retry / duration `p50`/`p90` / file-churn, with explicit `n` and recency window. Not a prediction, no causation. |
 
 ## See it
 
@@ -84,8 +85,14 @@ sh_run { "command": "npm run build", "expect": { "exit": 0, "file_exists": "dist
 // check blast radius before running (git is classified per-subcommand)
 sh_plan { "command": "git push --force" }            // → { category: "destructive", … }
 
-// confine a risky script to cwd, deny network
-sh_run { "command": "./untrusted.sh", "sandbox": { "network": false } }
+// confine a risky script to cwd, deny network, block reads of secret dirs
+sh_run { "command": "./untrusted.sh", "sandbox": { "network": false, "protect_secrets": true } }
+
+// dry-run in a CoW clone — see the cwd-relative diff, real cwd untouched
+sh_run { "command": "rm -rf build && npm run generate", "preview": true }
+
+// is this command historically slow/flaky here? (descriptive, not a prediction)
+sh_history { "command": "npm test" }
 
 // undo a refactor
 sh_checkpoint { "label": "pre-refactor" }
@@ -105,7 +112,8 @@ sh_detail { "id": "cmd9", "selector": "stdout", "match": "ERROR|version=" }
 | `timeout_ms` | Per-command timeout (default 120s). On expiry the whole **process group** is killed (SIGTERM→SIGKILL), so a compound command's grandchildren (`sleep 5; …`) are reaped too. |
 | `expect` | Post-conditions verified in the same call: `exit`, `stdout_contains`, `stdout_matches`, `stderr_empty`, `file_exists`, `file_absent`, `changed`, `max_ms`. Failures surface in `assert_ok` + `assertions_failed` — no second `ls`/`grep`/`git status`. |
 | `retries` / `retry_on_exit` / `backoff_ms` | Declarative retry; `attempts` is reported when > 1. |
-| `sandbox` | Real OS sandbox. `true` confines file **writes** to cwd + temp; `{ network: false }` also denies network; `{ writable: [...] }` adds roots. **Refuses to run** if unavailable. Sets `sandboxed: true`. |
+| `sandbox` | Real OS sandbox. `true` confines file **writes** to cwd + temp; `{ network: false }` also denies network; `{ writable: [...] }` adds roots. `{ protect_secrets: true }` or `{ deny_read: [...] }` also **blocks reads** of configured secret dirs (`~/.ssh`, `~/.aws`, …) — macOS `deny file-read*`, Linux `--tmpfs` mask; sets `secrets_protected: <n>`. Scoped: it blocks the **listed** paths, not a proof against all exfiltration. **Refuses to run** if unavailable — never executes unconfined. Sets `sandboxed: true`. |
+| `preview` | **Dry-run in a disposable CoW clone of cwd** — the command runs *inside* the clone, you get the cwd-relative `files_changed`, and the real cwd is **never touched** (nothing is promoted). Honest scope: absolute-path / parent-dir / network effects are **not** captured and may happen for real — this is **not** a sandbox (combine with `sandbox:true` for containment). **Refuses** if the cwd can't be cloned. Sets `preview: true` + `preview_warning`. |
 | `trace` | Structured FS/syscall trace (Linux `strace`). Surfaces `trace_summary` (paths read/written + syscall count); full trace via `sh_detail selector=trace`. Best-effort: no tracer → command still runs, `trace_unavailable: true`. |
 
 </details>
@@ -114,7 +122,8 @@ sh_detail { "id": "cmd9", "selector": "stdout", "match": "ERROR|version=" }
 
 `id`, `exit`, `ok`, `ms`; then `attempts`, `stdout_lines`/`stderr_lines` (TRUE emitted
 counts), `files_changed`, `timed_out`, `stdout_truncated`/`stderr_truncated`,
-`stdout_binary`/`stderr_binary`, `sandboxed`, `trace_summary`/`trace_unavailable`,
+`stdout_binary`/`stderr_binary`, `sandboxed`, `secrets_protected`,
+`preview`/`preview_method`/`preview_warning`, `trace_summary`/`trace_unavailable`,
 `assert_ok`/`assertions_failed`, `advice`, `hint`, and the condensed `stdout`/`stderr`.
 
 </details>

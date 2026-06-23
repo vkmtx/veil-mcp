@@ -21,7 +21,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { resolve, dirname, basename, join } from "node:path";
 
 export interface SandboxOpts {
@@ -29,9 +29,36 @@ export interface SandboxOpts {
   network?: boolean;
   /** extra writable paths (subpaths), beyond cwd and the temp dir. */
   writable?: string[];
+  /**
+   * Paths whose CONTENTS are blocked from being read under the sandbox (a secret
+   * denylist: ~/.ssh, ~/.aws, …). macOS: `(deny file-read* (subpath …))`. Linux:
+   * the path is masked with an empty `--tmpfs`, so it must be an existing DIRECTORY.
+   * This is a SCOPED guarantee — it blocks reads of the configured paths, NOT a
+   * proof the agent cannot exfiltrate by any means. See registerShRun's honesty note.
+   */
+  denyRead?: string[];
 }
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+/**
+ * Well-known credential DIRECTORIES, used when sh_run is asked to protect secrets
+ * with no explicit list. Directories only (not single files like ~/.netrc) so the
+ * Linux `--tmpfs` masking is uniform across backends. Resolved against $HOME.
+ */
+export function defaultSecretPaths(): string[] {
+  const h = homedir();
+  if (!h) return [];
+  return [
+    join(h, ".ssh"),
+    join(h, ".aws"),
+    join(h, ".gnupg"),
+    join(h, ".config", "gcloud"),
+    join(h, ".config", "gh"),
+    join(h, ".kube"),
+    join(h, ".docker"),
+  ];
+}
 
 /** Device files programs commonly need to write even under tight confinement. */
 const DEV_WRITES = ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/dtracehelper"];
@@ -107,6 +134,16 @@ function safeWriteRoots(cwd: string, opts: SandboxOpts): string[] {
   return roots;
 }
 
+/** Canonical, validated read-deny roots (the secret denylist), same path-safety
+ *  rejection as the writable set so they can't break the profile/arg literal. */
+function safeDenyReads(opts: SandboxOpts): string[] {
+  const roots = (opts.denyRead ?? []).map((p) => canonical(p));
+  for (const p of roots) {
+    if (/["'\n\\]/.test(p)) throw new Error(`unsafe path in sandbox denyRead set: ${JSON.stringify(p)}`);
+  }
+  return roots;
+}
+
 /**
  * Build an SBPL profile (macOS). Rule order matters: later rules win, so we allow
  * everything, deny ALL writes, then re-allow the permitted write roots.
@@ -115,12 +152,19 @@ export function buildProfile(cwd: string, opts: SandboxOpts = {}): string {
   const subpaths = safeWriteRoots(cwd, opts).map((p) => `  (subpath ${JSON.stringify(p)})`).join("\n");
   const devs = DEV_WRITES.map((p) => `  (literal ${JSON.stringify(p)})`).join("\n");
   const net = opts.network === false ? "(deny network*)\n" : "";
+  // Secret read-deny goes LAST so it wins over `(allow default)` — block reads of
+  // the configured secret subpaths even though everything else stays readable.
+  const denyReads = safeDenyReads(opts);
+  const readDeny = denyReads.length
+    ? `(deny file-read*\n${denyReads.map((p) => `  (subpath ${JSON.stringify(p)})`).join("\n")}\n)\n`
+    : "";
   return (
     `(version 1)\n` +
     `(allow default)\n` +
     `(deny file-write*)\n` +
     `(allow file-write*\n${subpaths}\n${devs}\n  (subpath "/dev/fd")\n)\n` +
-    net
+    net +
+    readDeny
   );
 }
 
@@ -143,9 +187,15 @@ export function buildBwrapArgs(command: string, cwd: string, opts: SandboxOpts =
     .map((p) => `--bind ${shQuote(p)} ${shQuote(p)}`)
     .join(" ");
   const net = opts.network === false ? "--unshare-net " : "";
+  // Mask each secret dir with an empty tmpfs so its real contents are unreadable.
+  // Placed AFTER --ro-bind / / so it overlays the bound host path; the path must be
+  // an existing directory (sh_run filters to existing dirs before calling here).
+  const mask = safeDenyReads(opts)
+    .map((p) => `--tmpfs ${shQuote(p)}`)
+    .join(" ");
   // --unshare-pid is required for `--proc /proc` to mount (else bwrap exits nonzero).
   return (
-    `bwrap --unshare-pid --ro-bind / / --dev /dev --proc /proc ${binds} --chdir ${shQuote(canonical(cwd))} ` +
+    `bwrap --unshare-pid --ro-bind / / --dev /dev --proc /proc ${binds}${mask ? " " + mask : ""} --chdir ${shQuote(canonical(cwd))} ` +
     `${net}--die-with-parent /bin/sh -c ${shQuote(command)}`
   );
 }

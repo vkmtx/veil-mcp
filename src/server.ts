@@ -5,12 +5,14 @@ import { registerShRun } from "./tools/sh_run.js";
 import { registerShDetail } from "./tools/sh_detail.js";
 import { registerShPlan } from "./tools/sh_plan.js";
 import { registerSnapshotTools } from "./tools/sh_snapshot.js";
+import { registerShHistory } from "./tools/sh_history.js";
 
 export function buildServer(): McpServer {
   const server = new McpServer({ name: "veil-mcp", version: "0.4.0" });
-  registerShRun(server); // exec + I/J/H/G/M
+  registerShRun(server); // exec + I/J/H/G/M + read-confine + preview
   registerShDetail(server); // J
   registerShPlan(server); // B + K-lite
   registerSnapshotTools(server); // C
+  registerShHistory(server); // descriptive run history
   return server;
 }
