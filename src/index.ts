@@ -13,6 +13,7 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { buildServer, VERSION } from "./server.js";
+import { installShutdown } from "./shutdown.js";
 import { runInit } from "./init.js";
 
 const USAGE = `veil-mcp — agent-native shell MCP server.
@@ -38,6 +39,10 @@ if (arg === "--version" || arg === "-v") {
   const server = buildServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // Reap detached background processes (sh_run background:true) when the agent goes
+  // away (transport close) or the process is signalled, so a dev server is never
+  // orphaned. No-op when no background run was ever started.
+  installShutdown(transport);
   // stdout is the MCP channel; logs must go to stderr.
   console.error("veil-mcp running on stdio");
 }

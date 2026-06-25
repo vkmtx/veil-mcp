@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { config } from "../config.js";
 import { runWithRetry } from "../exec.js";
+import { startBackground } from "../bgregistry.js";
 import { gitStatus, gitToplevel, diffStatus, effectsFromTrace, cloneDiff } from "../effects.js";
 import { withRepoLock } from "../repolock.js";
 import { condense, lineCount } from "../render.js";
@@ -174,11 +175,147 @@ export function registerShRun(server: McpServer): void {
               "written to disk. Use for a sensitive run whose output should not persist. Result carries " +
               "stored:\"memory-only\" so you know sh_detail works now but nothing was persisted.",
           ),
+        background: z
+          .boolean()
+          .optional()
+          .describe(
+            "Run as a LONG-RUNNING background process (dev server, --watch build): returns IMMEDIATELY " +
+              "with { id, pid, status:\"running\" } instead of blocking until exit. Poll its output with " +
+              "sh_logs id=<id> (pass the returned cursor to tail only new lines); stop it with sh_kill id=<id>. " +
+              "No stdin/TTY. Incompatible with options that require completion (expect, preview, trace, retries, " +
+              "full, timeout_ms) — those are refused. Keeps cwd, sandbox, scrub_env, no_store.",
+          ),
       },
     },
-    async ({ command, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview, scrub_env, no_store }) => {
+    async ({ command, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview, scrub_env, no_store, background }) => {
       const origin = cwd ?? process.cwd();
       let workdir = origin;
+
+      // Background branch — handled EARLY, before the effect-window / preview / trace
+      // machinery, because those all depend on the command COMPLETING. A background run
+      // returns immediately, so any option that requires completion is incompatible and
+      // refused (rather than silently ignored). It keeps cwd, sandbox (a confined dev
+      // server is valuable), scrub_env, and no_store.
+      if (background) {
+        const incompatible: string[] = [];
+        if (expect) incompatible.push("expect");
+        if (preview) incompatible.push("preview");
+        if (trace) incompatible.push("trace");
+        if (retries) incompatible.push("retries");
+        if (retry_on_exit) incompatible.push("retry_on_exit");
+        if (backoff_ms) incompatible.push("backoff_ms");
+        if (full) incompatible.push("full");
+        if (timeout_ms !== undefined) incompatible.push("timeout_ms");
+        if (incompatible.length) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: `background runs return immediately, so these options (which require the command to complete) are not supported: ${incompatible.join(", ")}`,
+                  background_incompatible: incompatible,
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Wrap for the sandbox exactly like the foreground path — a confined dev server
+        // is a real win. Honesty contract preserved: refuse rather than run unconfined.
+        let bgToRun = command;
+        let bgSandboxed = false;
+        let bgSecretsProtected = 0;
+        let bgSecretsUnprotected: string[] = [];
+        let bgProtectsSecrets = false;
+        if (sandbox) {
+          if (!sandboxAvailable()) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    error: "sandbox requested but unavailable (needs macOS sandbox-exec, or Linux bubblewrap / Landlock-landrun); refusing to run unconfined",
+                    sandbox_unavailable: true,
+                  }),
+                },
+              ],
+              isError: true,
+            };
+          }
+          try {
+            const raw =
+              sandbox === true
+                ? {}
+                : (sandbox as { network?: boolean; writable?: string[]; protect_secrets?: boolean; deny_read?: string[] });
+            bgProtectsSecrets = !!raw.protect_secrets || !!(raw.deny_read && raw.deny_read.length);
+            const { dirs: denyRead, droppedFiles } = partitionSecrets([
+              ...(raw.protect_secrets ? defaultSecretPaths() : []),
+              ...(raw.deny_read ?? []),
+            ]);
+            const sbOpts: SandboxOpts = { network: raw.network, writable: raw.writable };
+            if (denyRead.length) sbOpts.denyRead = denyRead;
+            bgToRun = wrapCommand(command, origin, sbOpts);
+            bgSandboxed = true;
+            bgSecretsProtected = denyRead.length;
+            bgSecretsUnprotected = droppedFiles;
+          } catch (e) {
+            const msg = String(e instanceof Error ? e.message : e);
+            const unsupported = /landlock backend cannot enforce/i.test(msg);
+            return {
+              content: [{ type: "text", text: JSON.stringify({ error: msg, ...(unsupported ? { sandbox_unsupported_feature: true } : {}) }) }],
+              isError: true,
+            };
+          }
+        }
+
+        // scrub credential-shaped env vars (explicit, or implied by secret protection),
+        // mirroring the foreground path so a backgrounded child is no leakier.
+        const bgScrub = scrub_env || bgProtectsSecrets;
+        let bgEnv: NodeJS.ProcessEnv = process.env;
+        let bgEnvScrubbed = 0;
+        if (bgScrub) {
+          const { env: scrubbedEnv, scrubbed } = scrubSecretEnv(process.env);
+          bgEnv = scrubbedEnv;
+          bgEnvScrubbed = scrubbed.length;
+        }
+
+        const started = startBackground({
+          command,
+          toRun: bgToRun,
+          cwd: origin,
+          env: bgEnv,
+          persist: !no_store,
+        });
+        if ("error" in started) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: started.error,
+                  ...(started.bg_limit_reached ? { bg_limit_reached: true } : {}),
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const result: Record<string, unknown> = {
+          id: started.id,
+          pid: started.pid,
+          status: "running",
+          background: true,
+          hint: `Background process started. Poll output: sh_logs id=${started.id}. Stop: sh_kill id=${started.id}.`,
+        };
+        if (bgSandboxed) result.sandboxed = true;
+        if (bgSecretsProtected) result.secrets_protected = bgSecretsProtected;
+        if (bgSecretsUnprotected.length) result.secrets_unprotected = bgSecretsUnprotected;
+        if (bgEnvScrubbed) result.secrets_env_scrubbed = bgEnvScrubbed;
+        if (no_store) result.stored = "memory-only";
+        return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      }
 
       // Dry-run preview — clone cwd and run INSIDE the clone so the real cwd is never
       // touched. Honesty contract: if the clone can't be made, REFUSE — never silently

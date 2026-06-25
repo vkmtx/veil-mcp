@@ -7,6 +7,8 @@ import { registerShDetail } from "./tools/sh_detail.js";
 import { registerShPlan } from "./tools/sh_plan.js";
 import { registerSnapshotTools } from "./tools/sh_snapshot.js";
 import { registerShHistory } from "./tools/sh_history.js";
+import { registerShLogs } from "./tools/sh_logs.js";
+import { registerShKill } from "./tools/sh_kill.js";
 
 // Single source of truth: read the version from package.json at runtime so the
 // version advertised over the MCP handshake can never drift from the published
@@ -22,5 +24,7 @@ export function buildServer(): McpServer {
   registerShPlan(server); // dry-run plan + static classification
   registerSnapshotTools(server); // checkpoint / rollback
   registerShHistory(server); // descriptive run history
+  registerShLogs(server); // poll a background run's output by id
+  registerShKill(server); // stop a background run by id
   return server;
 }
