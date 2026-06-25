@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
 import { extractSignals } from "../src/signals.js";
 import { diffStatus, effectsFromTrace } from "../src/effects.js";
-import { sandboxAvailable, buildProfile, buildBwrapArgs, buildLandrunArgs, defaultSecretPaths } from "../src/policy.js";
+import { sandboxAvailable, buildProfile, buildBwrapArgs, buildLandrunArgs, defaultSecretPaths, scrubSecretEnv } from "../src/policy.js";
 import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
 import { runInit } from "../src/init.js";
@@ -263,6 +263,13 @@ let rcThrew = false;
 try { buildProfile("/tmp/x", { denyRead: ["/bad'quote"] }); } catch { rcThrew = true; }
 check("profile rejects unsafe denyRead path", rcThrew);
 check("defaultSecretPaths includes ssh + aws dirs", defaultSecretPaths().some((p) => p.endsWith("/.ssh")) && defaultSecretPaths().some((p) => p.endsWith("/.aws")));
+
+// OGL-98 — scrubSecretEnv drops credential-shaped names, keeps infra vars, and
+// HONESTLY lists exactly what it removed (sorted) so the count can be disclosed.
+const scrub = scrubSecretEnv({ PATH: "/bin", HOME: "/h", AWS_SECRET_ACCESS_KEY: "x", GITHUB_TOKEN: "y", MY_API_KEY: "z", FOO: "keep", LANG: "C" });
+check("scrubSecretEnv keeps infra + non-secret vars", scrub.env.PATH === "/bin" && scrub.env.HOME === "/h" && scrub.env.FOO === "keep" && scrub.env.LANG === "C");
+check("scrubSecretEnv drops credential-shaped names", !("AWS_SECRET_ACCESS_KEY" in scrub.env) && !("GITHUB_TOKEN" in scrub.env) && !("MY_API_KEY" in scrub.env));
+check("scrubSecretEnv reports exactly the dropped names, sorted", JSON.stringify(scrub.scrubbed) === JSON.stringify(["AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "MY_API_KEY"]));
 
 // interactive-command detector (advisory only).
 check("looksInteractive flags editor", looksInteractive("vim file.txt") === true);
@@ -943,6 +950,51 @@ const byKept = text(await byC.callTool({ name: "sh_detail", arguments: { id: byL
 check("byte-budget keeps the most recent record", byKept.split("\n").filter(Boolean).length === 20000);
 await byC.close();
 rmSync(byDir, { recursive: true, force: true });
+
+// ── 31) OGL-98 e2e — scrub_env strips the server's credential-shaped vars from the
+// child so a spawned command can't echo them, and discloses the count. A fresh server
+// inherits a fake secret in its env; with scrub_env the child sees nothing. ──
+const scrubEnv = { ...process.env, FAKE_TOKEN_SECRET: "leakme-12345" };
+const scT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: scrubEnv });
+const scC = new Client({ name: "smoke-scrub", version: "0.0.0" });
+await scC.connect(scT);
+const scrubbed = JSON.parse(text(await scC.callTool({ name: "sh_run", arguments: { command: "echo $FAKE_TOKEN_SECRET", scrub_env: true } })));
+check("scrub_env hides the secret value from the child", !String(scrubbed.stdout ?? "").includes("leakme-12345"));
+check("scrub_env discloses a non-zero scrubbed count", scrubbed.secrets_env_scrubbed >= 1);
+// without scrub_env the same value DOES reach the child — proving the scrub is the cause.
+const unscrubbed = JSON.parse(text(await scC.callTool({ name: "sh_run", arguments: { command: "echo $FAKE_TOKEN_SECRET" } })));
+check("no scrub_env: child still sees the env value (scrub is the cause)", String(unscrubbed.stdout ?? "").includes("leakme-12345") && !("secrets_env_scrubbed" in unscrubbed));
+// sandbox protect_secrets must AUTO-enable env scrubbing (masking ~/.ssh while leaving
+// tokens in $env would be inconsistent) — only assertable where a sandbox exists.
+if (sandboxAvailable()) {
+  const autoWork = mkdtempSync(join(tmpdir(), "veil-scrubauto-"));
+  const auto = JSON.parse(text(await scC.callTool({ name: "sh_run", arguments: { command: "echo $FAKE_TOKEN_SECRET", cwd: autoWork, sandbox: { protect_secrets: true } } })));
+  check("protect_secrets auto-enables env scrubbing", auto.secrets_env_scrubbed >= 1 && !String(auto.stdout ?? "").includes("leakme-12345"));
+  rmSync(autoWork, { recursive: true, force: true });
+}
+await scC.close();
+
+// ── 32) OGL-99 e2e — no_store keeps a run MEMORY-ONLY: sh_detail works this session
+// but NO cmdN.json is ever written to disk. A normal run's record DOES land on disk. ──
+const nsDir = mkdtempSync(join(tmpdir(), "veil-nostore-"));
+const nsT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_STATE_DIR: nsDir } });
+const nsClient = new Client({ name: "smoke-nostore", version: "0.0.0" });
+await nsClient.connect(nsT);
+// the proj-* subdir is created on boot (resolveDir); find it for on-disk assertions.
+const nsProj = () => readdirSync(nsDir).filter((f) => f.startsWith("proj-")).map((f) => join(nsDir, f))[0];
+const recOnDisk = (id: string) => { const p = nsProj(); return p ? existsSync(join(p, `${id}.json`)) : false; };
+const memOnly = JSON.parse(text(await nsClient.callTool({ name: "sh_run", arguments: { command: "echo hi", no_store: true } })));
+check("no_store run flagged memory-only", memOnly.stored === "memory-only");
+check("no_store run writes NO record file to disk", !recOnDisk(memOnly.id));
+// …yet the SAME session can still sh_detail it from the in-memory cache.
+const memDetail = text(await nsClient.callTool({ name: "sh_detail", arguments: { id: memOnly.id, selector: "stdout" } }));
+check("no_store run still addressable via sh_detail (memory cache)", memDetail.includes("hi"));
+// contrast: a normal run IS persisted — its record file appears on disk.
+const persisted = JSON.parse(text(await nsClient.callTool({ name: "sh_run", arguments: { command: "echo bye" } })));
+check("normal run is not flagged memory-only", persisted.stored !== "memory-only");
+check("normal run DOES write a record file to disk", recOnDisk(persisted.id));
+await nsClient.close();
+rmSync(nsDir, { recursive: true, force: true });
 
 rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? `\nALL PASS (${total} assertions)` : `\n${failures}/${total} FAILED`);

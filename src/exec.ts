@@ -71,6 +71,10 @@ export function runCommand(
   command: string,
   cwd: string,
   timeoutMs: number = config.defaultTimeoutMs,
+  // Child environment. Defaults to the server's own env so existing callers are
+  // unchanged; sh_run passes a scrubbed copy (see policy.scrubSecretEnv) when it
+  // wants the server's credentials kept out of the command.
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
     const startedAt = process.hrtime.bigint();
@@ -80,7 +84,7 @@ export function runCommand(
     // shell does NOT exec into, so killing the shell alone orphans them — they keep
     // the stdout pipe open and the run blocks until they exit, defeating the
     // timeout. Killing the process group (negative pid) reaps the grandchildren too.
-    const child = spawn(command, { cwd, shell: true, env: process.env, detached: true });
+    const child = spawn(command, { cwd, shell: true, env, detached: true });
 
     const out = new BoundedBuffer(config.maxStreamBytes);
     const err = new BoundedBuffer(config.maxStreamBytes);
@@ -172,11 +176,13 @@ export async function runWithRetry(
   cwd: string,
   timeoutMs: number,
   spec: RetrySpec,
+  // Threaded into each attempt's runCommand; defaults to process.env (see runCommand).
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<RetryResult> {
   const maxAttempts = Math.max(1, spec.retries + 1);
   let last!: ExecResult;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    last = await runCommand(command, cwd, timeoutMs);
+    last = await runCommand(command, cwd, timeoutMs, env);
     const failed = last.exit !== 0;
     const retryable =
       !spec.retryOnExit || spec.retryOnExit.length === 0

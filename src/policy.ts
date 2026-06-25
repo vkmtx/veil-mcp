@@ -69,6 +69,95 @@ export function defaultSecretPaths(): string[] {
   ];
 }
 
+/**
+ * Names that LOOK like secrets — matched case-insensitively against env var names
+ * by scrubSecretEnv. Two groups: generic credential-shaped substrings (a name that
+ * mentions a token / key / password / secret / credential / session-token is treated
+ * as sensitive), and well-known provider prefixes whose vars are almost always creds.
+ *
+ * This is a best-effort DENYLIST, not a guarantee: it catches the conventional names
+ * but cannot know an arbitrarily-named secret (e.g. `FOO=<api key>`). It is scoped to
+ * keeping the SERVER's own credentials out of spawned commands — not proof against
+ * exfiltration. Benign infra vars (PATH, HOME, …) are protected by ENV_KEEP below.
+ */
+export const SECRET_ENV_PATTERNS: RegExp[] = [
+  // Generic credential-shaped substrings, anywhere in the name.
+  /SECRET/i,
+  /TOKEN/i,
+  /PASSWORD/i,
+  /PASSWD/i,
+  /(^|_)PWD$/i, //   trailing PWD (PG_PWD) — but PWD itself is the working dir; see ENV_KEEP.
+  /CREDENTIAL/i, //  also matches CREDENTIALS
+  // Only credential-shaped session vars — a bare /SESSION/ would also strip benign
+  // desktop vars (DBUS_SESSION_BUS_ADDRESS, SESSION_MANAGER, XDG_SESSION_*) that
+  // keyring / gpg-agent / git-credential commands legitimately need.
+  /SESSION_?(TOKEN|KEY|SECRET)/i,
+  /PRIVATE_?KEY/i,
+  /ACCESS_?KEY/i,
+  /API_?KEY/i,
+  /(^|_)KEY$/i, //   trailing _KEY (SIGNING_KEY) without flagging KEYBOARD/KEYWORD etc.
+  // Well-known provider prefixes — their vars are almost always credentials.
+  /^AWS_/i,
+  /^GITHUB_/i,
+  /^GH_/i,
+  /^OPENAI_/i,
+  /^ANTHROPIC_/i,
+  /^GOOGLE_/i,
+  /^GCP_/i,
+  /^AZURE_/i,
+  /^STRIPE_/i,
+  /^SLACK_/i,
+  /^NPM_TOKEN$/i, //  (already covered by /TOKEN/, kept for explicitness)
+  /^HF_/i,
+  /^HUGGINGFACE_/i,
+];
+
+/**
+ * Infrastructure vars a command legitimately needs — never scrubbed even if a
+ * pattern above would otherwise match (PWD matches the trailing-PWD rule). Compared
+ * case-insensitively; LC_* is allowed by prefix.
+ */
+const ENV_KEEP = new Set(
+  ["PATH", "HOME", "USER", "SHELL", "LANG", "TERM", "TMPDIR", "PWD", "NODE_ENV", "CI"].map((n) => n.toUpperCase()),
+);
+
+/** True if `name` is a benign infra var that must survive scrubbing. */
+function isKept(name: string): boolean {
+  const up = name.toUpperCase();
+  return ENV_KEEP.has(up) || up.startsWith("LC_");
+}
+
+/**
+ * Return a COPY of `env` with well-known secret-shaped variables removed, plus the
+ * sorted list of removed names (so the caller can HONESTLY disclose what it dropped).
+ *
+ * Policy (case-insensitive, see SECRET_ENV_PATTERNS): names containing SECRET, TOKEN,
+ * PASSWORD/PASSWD, a trailing _PWD, CREDENTIAL(S), SESSION_TOKEN/KEY, PRIVATE_KEY, ACCESS_KEY,
+ * API_KEY/APIKEY, a trailing _KEY; plus the common provider prefixes (AWS_, GITHUB_/GH_,
+ * OPENAI_, ANTHROPIC_, GOOGLE_/GCP_, AZURE_, STRIPE_, SLACK_, NPM_TOKEN, HF_/HUGGINGFACE_).
+ *
+ * Infra vars in ENV_KEEP (PATH, HOME, USER, SHELL, LANG, LC_*, TERM, TMPDIR, PWD,
+ * NODE_ENV, CI) are always kept so commands still run. Anything not matching a pattern
+ * is left untouched.
+ *
+ * BEST-EFFORT: a denylist of conventional names — it does NOT catch an arbitrarily
+ * named secret and is not proof against exfiltration. It is scoped to keeping the
+ * server's own environment credentials out of spawned commands.
+ */
+export function scrubSecretEnv(env: NodeJS.ProcessEnv): { env: NodeJS.ProcessEnv; scrubbed: string[] } {
+  const out: NodeJS.ProcessEnv = {};
+  const scrubbed: string[] = [];
+  for (const name of Object.keys(env)) {
+    if (!isKept(name) && SECRET_ENV_PATTERNS.some((re) => re.test(name))) {
+      scrubbed.push(name);
+      continue;
+    }
+    out[name] = env[name];
+  }
+  scrubbed.sort();
+  return { env: out, scrubbed };
+}
+
 /** Device files programs commonly need to write even under tight confinement. */
 const DEV_WRITES = ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/dtracehelper"];
 
