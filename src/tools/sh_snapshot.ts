@@ -64,9 +64,11 @@ export function registerSnapshotTools(server: McpServer): void {
     "sh_checkpoints",
     {
       title: "List checkpoints",
-      description: "List existing checkpoint labels.",
-      inputSchema: {},
+      description: "List existing checkpoint labels for a project directory (checkpoints are namespaced per directory).",
+      inputSchema: {
+        dir: z.string().optional().describe("Project directory whose checkpoints to list. Defaults to server cwd."),
+      },
     },
-    async () => ok({ checkpoints: list() }),
+    async ({ dir }) => ok({ checkpoints: list(dir ?? process.cwd()) }),
   );
 }

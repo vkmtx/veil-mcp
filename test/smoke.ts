@@ -15,7 +15,9 @@ import { sandboxAvailable, buildProfile, buildBwrapArgs, buildLandrunArgs, defau
 import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
 import { runInit } from "../src/init.js";
-import { chooseMethod } from "../src/snapshot.js";
+import { chooseMethod, checkpoint, restore, list } from "../src/snapshot.js";
+import { CLASSIFY_CORPUS } from "./classify-corpus.js";
+import { runCommand } from "../src/exec.js";
 import { TURNS, recallCorpus, recallSurfaced } from "../bench/metrics-data.js";
 import { config } from "../src/config.js";
 
@@ -325,6 +327,14 @@ const tc = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { 
 check("compound timeout flagged", tc.timed_out === true && tc.exit === 124);
 check("compound timeout actually fast", Date.now() - t1 < 4000);
 
+// 5c) on timeout we SIGTERM then escalate to SIGKILL after 2s, holding that
+// escalation timer so finish() can cancel it once the child exits. A child that
+// exits promptly on SIGTERM must settle WITHOUT waiting the 2s hard-kill window.
+// (The stray-SIGKILL-to-a-recycled-pgid negative isn't observable in-process, so we
+// assert the prompt-settle path that contains the timer-clear instead.)
+const graceful = await runCommand("trap 'exit 0' TERM; sleep 10", process.cwd(), 300);
+check("SIGTERM-graceful run settles without the 2s hard-kill wait", graceful.timedOut === true && graceful.durationMs < 1500);
+
 // 6) effect diff in a real git repo
 const repo = mkdtempSync(join(tmpdir(), "veil-"));
 execSync("git init -q && git config user.email t@t.co && git config user.name t", { cwd: repo, shell: "/bin/bash" });
@@ -332,6 +342,9 @@ writeFileSync(join(repo, "a.txt"), "base\n");
 execSync("git add -A && git commit -qm init", { cwd: repo, shell: "/bin/bash" });
 const e = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo new > b.txt && echo more >> a.txt", cwd: repo } })));
 check("effect diff lists modified + new", Array.isArray(e.files_changed) && e.files_changed.some((l: string) => l.includes("a.txt")) && e.files_changed.some((l: string) => l.includes("b.txt")));
+// OGL-102: the gitStatus-backed effects path still reports a non-empty changeset
+// after switching `git status` to execFileSync (maxBuffer raised, no shell hop).
+check("gitStatus-backed files_changed non-empty after execFileSync switch", Array.isArray(e.files_changed) && e.files_changed.length > 0);
 // deleting an untracked file reads as a deletion, not a "(reverted)" rollback. (bug found v0.2)
 writeFileSync(join(repo, "scratch.txt"), "tmp\n");
 const del = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "rm scratch.txt", cwd: repo } })));
@@ -404,7 +417,7 @@ const rs = JSON.parse(text(await client.callTool({ name: "sh_restore", arguments
 check("restore reported", rs.restored === "pre");
 check("restore brings back deleted file", existsSync(join(ckptDir, "keep.txt")));
 check("restore removes files created after checkpoint", !existsSync(join(ckptDir, "junk.txt")));
-const cl = JSON.parse(text(await client.callTool({ name: "sh_checkpoints", arguments: {} })));
+const cl = JSON.parse(text(await client.callTool({ name: "sh_checkpoints", arguments: { dir: ckptDir } })));
 check("checkpoints listed", Array.isArray(cl.checkpoints) && cl.checkpoints.includes("pre"));
 rmSync(ckptDir, { recursive: true, force: true });
 
@@ -600,9 +613,15 @@ const missRestore = JSON.parse(text(await client.callTool({ name: "sh_restore", 
 check("restore unknown label errors", typeof missRestore.error === "string" && missRestore.error.includes("no checkpoint named"));
 const missDir = JSON.parse(text(await client.callTool({ name: "sh_checkpoint", arguments: { label: "okdir", dir: "/no/such/dir/zzz" } })));
 check("checkpoint missing dir errors", typeof missDir.error === "string" && missDir.error.includes("dir does not exist"));
+writeFileSync(join(snapB, "snapB-marker.txt"), "do not wipe\n");
 await client.callTool({ name: "sh_checkpoint", arguments: { label: "guardtest", dir: snapA } });
 const wrongDir = JSON.parse(text(await client.callTool({ name: "sh_restore", arguments: { label: "guardtest", dir: snapB } })));
-check("restore refuses mismatched target dir", typeof wrongDir.error === "string" && wrongDir.error.includes("refusing to restore"));
+// Checkpoints are namespaced per source dir, so one taken in snapA is unaddressable
+// from snapB — restore fails safely with "no checkpoint named" (the origin-sidecar
+// "refusing to restore" guard stays as defense-in-depth). Either way, the mismatched
+// target must NOT be wiped by rsync --delete.
+check("restore into a mismatched dir fails safely", typeof wrongDir.error === "string" && (wrongDir.error.includes("no checkpoint named") || wrongDir.error.includes("refusing to restore")));
+check("mismatched-dir restore does not wipe the target", existsSync(join(snapB, "snapB-marker.txt")));
 rmSync(snapA, { recursive: true, force: true });
 rmSync(snapB, { recursive: true, force: true });
 
@@ -851,6 +870,35 @@ if (sandboxAvailable()) {
   rmSync(fakeHome, { recursive: true, force: true });
   rmSync(psWork, { recursive: true, force: true });
 }
+
+// ── 28) classifier safety corpus (OGL-104) — the historically-risky commands must
+// never be UNDER-flagged. Mirror classify.ts's RANK so a corpus case can assert the
+// observed category is AT LEAST as severe as its floor (controls assert exact). ──
+const CORPUS_RANK: Record<string, number> = { destructive: 5, network: 4, mutating: 3, unknown: 2, "read-only": 1, complex: 0 };
+for (const c of CLASSIFY_CORPUS) {
+  const got = classify(c.command).category;
+  const ok = c.exact ? got === c.minCategory : CORPUS_RANK[got] >= CORPUS_RANK[c.minCategory];
+  check(`corpus: ${c.command} ${c.exact ? "==" : ">="} ${c.minCategory} (got ${got})`, ok);
+}
+
+// ── 29) per-project checkpoint namespacing (OGL-96) — the SAME label taken from two
+// different dirs must not collide: each restore brings back only its own marker. ──
+const nsA = mkdtempSync(join(tmpdir(), "veil-ns-a-"));
+const nsB = mkdtempSync(join(tmpdir(), "veil-ns-b-"));
+writeFileSync(join(nsA, "marker.txt"), "from-A\n");
+writeFileSync(join(nsB, "marker.txt"), "from-B\n");
+checkpoint("shared", nsA);
+checkpoint("shared", nsB); // same label, different dir — must not clobber A's snapshot
+check("namespacing: each dir lists its own checkpoint independently", list(nsA).includes("shared") && list(nsB).includes("shared"));
+// mutate both, then restore each from its own snapshot.
+writeFileSync(join(nsA, "marker.txt"), "MUTATED-A\n");
+writeFileSync(join(nsB, "marker.txt"), "MUTATED-B\n");
+restore("shared", nsA);
+restore("shared", nsB);
+check("namespacing: dir A restores A's marker (not B's)", readFileSync(join(nsA, "marker.txt"), "utf8") === "from-A\n");
+check("namespacing: dir B restores B's marker (not A's)", readFileSync(join(nsB, "marker.txt"), "utf8") === "from-B\n");
+rmSync(nsA, { recursive: true, force: true });
+rmSync(nsB, { recursive: true, force: true });
 
 rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? `\nALL PASS (${total} assertions)` : `\n${failures}/${total} FAILED`);

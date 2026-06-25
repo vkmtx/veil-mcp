@@ -144,7 +144,7 @@ console.log("\n=== 4. CHECKPOINT COST (CoW clone latency + space vs rsync) ===")
   } else {
     console.log(`→ clone unavailable here (cross-volume / non-APFS); used the rsync mirror honestly (method=${info.method})`);
   }
-  await import("../src/snapshot.js").then((m) => m.drop("metrics-bench"));
+  await import("../src/snapshot.js").then((m) => m.drop("metrics-bench", src));
   rmSync(src, { recursive: true, force: true });
   rmSync(rdest, { recursive: true, force: true });
 }
