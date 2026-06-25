@@ -8,7 +8,7 @@ import { gitStatus, diffStatus, effectsFromTrace, cloneDiff } from "../effects.j
 import { condense, lineCount } from "../render.js";
 import { nextId, put } from "../store.js";
 import { evaluate, type Expectation } from "../assert.js";
-import { sandboxAvailable, wrapCommand, defaultSecretPaths, type SandboxOpts } from "../policy.js";
+import { sandboxAvailable, wrapCommand, defaultSecretPaths, scrubSecretEnv, type SandboxOpts } from "../policy.js";
 import { cloneForPreview, dropPreview, type PreviewClone } from "../snapshot.js";
 import { classify, looksInteractive } from "../classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace, type TraceSummary } from "../trace.js";
@@ -81,7 +81,9 @@ export function registerShRun(server: McpServer): void {
         "duration, files changed (git diff), and a token-aware view of stdout/stderr " +
         "(full on small/failure, head+tail otherwise). Full output is stored and " +
         "addressable via sh_detail — it is NOT re-emitted into context. Prefer this " +
-        "over a raw Bash call when you care about effects or output is likely verbose.",
+        "over a raw Bash call when you care about effects or output is likely verbose. " +
+        "Pass scrub_env:true to strip credential-shaped env vars from the child (auto-on " +
+        "with sandbox protect_secrets/deny_read); no_store:true keeps a sensitive run memory-only.",
       inputSchema: {
         command: z.string().describe("The shell command to execute."),
         cwd: z.string().optional().describe("Working directory. Defaults to the server's cwd."),
@@ -143,9 +145,26 @@ export function registerShRun(server: McpServer): void {
               "read/write summary; full trace via sh_detail selector=trace. Best-effort: if no " +
               "tracer is available the command still runs and trace_unavailable is set.",
           ),
+        scrub_env: z
+          .boolean()
+          .optional()
+          .describe(
+            "Strip credential-shaped vars (SECRET/TOKEN/PASSWORD/KEY/… see SECRET_ENV_PATTERNS) " +
+              "from the command's environment so a child can't read them. Auto-enabled whenever the " +
+              "sandbox requests protect_secrets or deny_read — masking ~/.ssh while leaving tokens in " +
+              "$env would be inconsistent. Surfaces secrets_env_scrubbed (a COUNT; values are never echoed).",
+          ),
+        no_store: z
+          .boolean()
+          .optional()
+          .describe(
+            "Keep this run MEMORY-ONLY: the record is cached for sh_detail this session but is NOT " +
+              "written to disk. Use for a sensitive run whose output should not persist. Result carries " +
+              "stored:\"memory-only\" so you know sh_detail works now but nothing was persisted.",
+          ),
       },
     },
-    async ({ command, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview }) => {
+    async ({ command, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview, scrub_env, no_store }) => {
       const origin = cwd ?? process.cwd();
       let workdir = origin;
 
@@ -181,6 +200,10 @@ export function registerShRun(server: McpServer): void {
       let sandboxed = false;
       let secretsProtected = 0;
       let secretsUnprotected: string[] = [];
+      // Did the sandbox request file-level secret protection? If so we auto-scrub the
+      // env too (OGL-98 coupling) — masking ~/.ssh while leaving $AWS_SECRET_ACCESS_KEY
+      // readable would be an inconsistent half-measure.
+      let sandboxProtectsSecrets = false;
       if (sandbox) {
         if (!sandboxAvailable()) {
           return {
@@ -201,6 +224,7 @@ export function registerShRun(server: McpServer): void {
             sandbox === true
               ? {}
               : (sandbox as { network?: boolean; writable?: string[]; protect_secrets?: boolean; deny_read?: string[] });
+          sandboxProtectsSecrets = !!raw.protect_secrets || !!(raw.deny_read && raw.deny_read.length);
           const { dirs: denyRead, droppedFiles } = partitionSecrets([
             ...(raw.protect_secrets ? defaultSecretPaths() : []),
             ...(raw.deny_read ?? []),
@@ -222,6 +246,18 @@ export function registerShRun(server: McpServer): void {
             isError: true,
           };
         }
+      }
+
+      // OGL-98 — scrub credential-shaped vars from the child env. Enabled explicitly
+      // via scrub_env, or implicitly when the sandbox already protects secret dirs (so
+      // env and filesystem stay consistent). When off, the child inherits process.env.
+      const scrubEnvEffective = scrub_env || sandboxProtectsSecrets;
+      let childEnv: NodeJS.ProcessEnv = process.env;
+      let secretsEnvScrubbed = 0;
+      if (scrubEnvEffective) {
+        const { env: scrubbedEnv, scrubbed } = scrubSecretEnv(process.env);
+        childEnv = scrubbedEnv;
+        secretsEnvScrubbed = scrubbed.length;
       }
 
       // Feature A — best-effort structured trace. Wrap OUTERMOST so the tracer
@@ -261,7 +297,7 @@ export function registerShRun(server: McpServer): void {
       // takes git snapshots of the (cloned) workdir.
       const useTrace = traceDir !== undefined;
       const before = !previewClone && !useTrace && trackEffects ? gitStatus(workdir) : null;
-      let res = await runWithRetry(toRun, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec);
+      let res = await runWithRetry(toRun, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec, childEnv);
 
       // Trace reconciliation — BEFORE computing effects so files_changed reflects the
       // run that actually happened (including a re-run).
@@ -283,7 +319,7 @@ export function registerShRun(server: McpServer): void {
           // NOT run and res.exit is strace's, not the command's. Re-run untraced to
           // recover the true result — tracing must never change a command's outcome.
           // (No double-execution: an absent file means the command never ran.)
-          res = await runWithRetry(preTraceCmd, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec);
+          res = await runWithRetry(preTraceCmd, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec, childEnv);
           traceUnavailable = true;
         }
         rmSync(traceDir, { recursive: true, force: true });
@@ -309,7 +345,8 @@ export function registerShRun(server: McpServer): void {
       }
 
       const id = nextId();
-      put({
+      put(
+        {
         id,
         command,
         cwd: origin,
@@ -326,7 +363,10 @@ export function registerShRun(server: McpServer): void {
         stderr: res.stderr,
         filesChanged,
         trace: traceText,
-      });
+        },
+        // OGL-99 — a sensitive run is cached for sh_detail but never written to disk.
+        no_store ? { persist: false } : undefined,
+      );
 
       const ok = res.exit === 0;
       // TRUE emitted line counts (not just retained bytes), so a truncated run's
@@ -354,6 +394,12 @@ export function registerShRun(server: McpServer): void {
       // Honesty: a requested secret path that exists as a FILE can't be masked by the
       // dir-only backend — disclose it so secrets_protected is never read as "all safe".
       if (secretsUnprotected.length) result.secrets_unprotected = secretsUnprotected;
+      // OGL-98 — disclose how many credential-shaped env vars were withheld from the
+      // child (a count only; values are never echoed).
+      if (secretsEnvScrubbed) result.secrets_env_scrubbed = secretsEnvScrubbed;
+      // OGL-99 — flag a memory-only run so the agent knows sh_detail works this session
+      // but nothing was persisted to disk.
+      if (no_store) result.stored = "memory-only";
       if (previewClone) {
         result.preview = true;
         result.preview_method = previewClone.method;

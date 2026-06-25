@@ -18,6 +18,13 @@ export interface ExecResult {
   stderrBinary: boolean;
 }
 
+/**
+ * A stored run. Normally persisted to disk (0600, TTL-pruned); a sensitive run can
+ * opt out via store.put(rec, { persist: false }), in which case the SAME shape lives
+ * only in the in-memory cache for the session and is never written to disk. No field
+ * distinguishes the two cases — persistence is a property of how put() was called,
+ * not of the record — so serialization is unchanged.
+ */
 export interface RunRecord {
   id: string;
   command: string;

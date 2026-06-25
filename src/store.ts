@@ -153,8 +153,30 @@ export function nextId(): string {
   return `cmd${counter}`;
 }
 
-export function put(rec: RunRecord): void {
+/**
+ * Cache a run record, and (by default) persist its full stdout/stderr to disk so
+ * sh_detail survives a server restart.
+ *
+ * Pass `{ persist: false }` to keep a run MEMORY-ONLY: the record is set in the
+ * in-memory cache (so sh_detail/sh_history still work for the rest of THIS session)
+ * but NOTHING is written to disk — no temp file, no rename, no record file. This is
+ * the per-run opt-out for a sensitive command (e.g. `env`, `cat .env`, `aws sts …`)
+ * whose output would otherwise leave plaintext secrets at rest. The slot's
+ * reservation lock (created by nextId) is removed best-effort so the id isn't leaked,
+ * and the memory backstop in evict() still applies. Once the server exits, a
+ * memory-only record is simply gone — it was never on disk.
+ */
+export function put(rec: RunRecord, opts?: { persist?: boolean }): void {
   records.set(rec.id, rec); // memory cache is set first, before any disk work
+  if (opts?.persist === false) {
+    // Memory-only: skip ALL disk writes. Drop the reservation lock so nextId's slot
+    // isn't permanently leaked (best-effort — no lock on the mem-id fallback path).
+    if (dir) {
+      try { unlinkSync(lockPath(rec.id)); } catch { /* no lock / already gone */ }
+    }
+    evict();
+    return;
+  }
   if (dir) {
     try {
       // Write to a temp file then atomically rename into place, so a concurrent
