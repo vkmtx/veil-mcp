@@ -21,12 +21,13 @@ export function gitStatus(cwd: string): Set<string> | null {
 
 /**
  * Effects-as-data from a TRACE instead of git (feature A × H). When a command ran
- * under a tracer we already know exactly which paths it wrote — derive files_changed
- * straight from that, scoped to `cwd`. This is cheaper than `git status` (no
- * worktree scan), more precise (catches untracked/ignored paths), and lets sh_run
- * skip the two git calls entirely when tracing. Paths are reported cwd-relative.
+ * under a tracer we already know exactly which paths it wrote AND removed — derive
+ * files_changed straight from that, scoped to `cwd`. This is cheaper than `git
+ * status` (no worktree scan), more precise (catches untracked/ignored paths), and
+ * lets sh_run skip the two git calls entirely when tracing. Paths are reported
+ * cwd-relative as "wrote <rel>" / "deleted <rel>".
  */
-export function effectsFromTrace(wrote: string[], cwd: string): string[] {
+export function effectsFromTrace(wrote: string[], deleted: string[], cwd: string): string[] {
   // strace records CANONICAL (realpath'd) paths, so match on the canonical cwd —
   // else a symlinked root (/tmp→/private/tmp, /var→/run, symlinked $HOME) drops real
   // in-cwd writes from files_changed. cloneDiff canonicalizes for the same reason.
@@ -38,14 +39,19 @@ export function effectsFromTrace(wrote: string[], cwd: string): string[] {
   }
   const out: string[] = [];
   const seen = new Set<string>();
-  for (const p of wrote) {
-    const abs = resolve(root, p);
-    if (abs !== root && !abs.startsWith(root + "/")) continue; // only effects under cwd
-    const rel = relative(root, abs) || ".";
-    if (seen.has(rel)) continue;
-    seen.add(rel);
-    out.push(`wrote ${rel}`);
-  }
+  const emit = (verb: string, paths: string[]): void => {
+    for (const p of paths) {
+      const abs = resolve(root, p);
+      if (abs !== root && !abs.startsWith(root + "/")) continue; // only effects under cwd
+      const rel = relative(root, abs) || ".";
+      const key = `${verb} ${rel}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(key);
+    }
+  };
+  emit("wrote", wrote);
+  emit("deleted", deleted);
   return out;
 }
 

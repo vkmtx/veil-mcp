@@ -296,9 +296,13 @@ export function registerShRun(server: McpServer): void {
         // expect.file_exists/file_absent must still resolve against it.
         filesChanged = cloneDiff(origin, previewClone.path);
       } else if (useTrace) {
-        // Trace ran → derive effects from what it actually wrote (cwd-scoped). If the
-        // trace failed to capture, there are no git snapshots to fall back to → null.
-        filesChanged = traceSummary ? effectsFromTrace(traceSummary.wrote, workdir) : null;
+        // Trace ran → derive effects from what it actually wrote AND removed/renamed
+        // (cwd-scoped). Residual honesty scope: a write through an ALREADY-OPEN fd
+        // (inherited/dup'd across the trace boundary) and exotic mutating syscalls
+        // are not captured, so files_changed is complete for create/write/delete/
+        // rename but still best-effort overall. If the trace failed to capture, there
+        // are no git snapshots to fall back to → null.
+        filesChanged = traceSummary ? effectsFromTrace(traceSummary.wrote, traceSummary.deleted, workdir) : null;
       } else {
         const after = trackEffects ? gitStatus(workdir) : null;
         filesChanged = diffStatus(before, after);
