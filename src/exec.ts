@@ -86,6 +86,7 @@ export function runCommand(
     const err = new BoundedBuffer(config.maxStreamBytes);
     let timedOut = false;
     let settled = false;
+    let killTimer: NodeJS.Timeout | null = null;
 
     /** Signal the child's whole process group; fall back to the lone child. */
     const killTree = (sig: NodeJS.Signals) => {
@@ -107,8 +108,11 @@ export function runCommand(
         ? setTimeout(() => {
             timedOut = true;
             killTree("SIGTERM");
-            // Hard kill if it ignores SIGTERM.
-            setTimeout(() => killTree("SIGKILL"), 2000).unref();
+            // Hard kill if it ignores SIGTERM. Held so finish() can cancel it —
+            // otherwise a child that exits before +2s leaves the SIGKILL pending,
+            // which could later land on a recycled process group.
+            killTimer = setTimeout(() => killTree("SIGKILL"), 2000);
+            killTimer.unref();
           }, timeoutMs)
         : null;
 
@@ -116,6 +120,7 @@ export function runCommand(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
       const oBin = out.isBinary;
       const eBin = err.isBinary;

@@ -1,16 +1,17 @@
 /** Feature H — effects as data. File changes via git porcelain before/after diff. */
 
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve, relative, join } from "node:path";
 
 /** Returns the set of porcelain status lines, or null if cwd is not a git repo. */
 export function gitStatus(cwd: string): Set<string> | null {
   try {
-    const out = execSync("git status --porcelain", {
+    const out = execFileSync("git", ["status", "--porcelain"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 64 * 1024 * 1024,
     });
     return new Set(out.split("\n").filter(Boolean));
   } catch {
