@@ -153,7 +153,7 @@ export function registerShRun(server: McpServer): void {
           .boolean()
           .optional()
           .describe(
-            "Capture a structured FS/syscall trace (feature A; Linux strace). Surfaces a " +
+            "Capture a structured FS/syscall trace (Linux strace). Surfaces a " +
               "read/write summary; full trace via sh_detail selector=trace. Best-effort: if no " +
               "tracer is available the command still runs and trace_unavailable is set.",
           ),
@@ -206,7 +206,7 @@ export function registerShRun(server: McpServer): void {
       // From here, a finally drops the preview clone on EVERY exit (return or throw),
       // so a disposable clone can never leak — even if a later step throws.
       try {
-      // Feature K — real sandbox. Wrap the command for kernel-level confinement.
+      // Sandbox enforcement. Wrap the command for kernel-level confinement.
       // Honesty contract: if confinement is unavailable, refuse rather than run free.
       let toRun = command;
       let sandboxed = false;
@@ -272,7 +272,7 @@ export function registerShRun(server: McpServer): void {
         secretsEnvScrubbed = scrubbed.length;
       }
 
-      // Feature A — best-effort structured trace. Wrap OUTERMOST so the tracer
+      // Best-effort structured syscall trace. Wrap OUTERMOST so the tracer
       // follows the (possibly sandboxed) command's forks. Observability, not safety:
       // degrade if no tracer rather than refusing.
       const preTraceCmd = toRun; // the (possibly sandboxed) command WITHOUT the tracer
@@ -453,7 +453,7 @@ export function registerShRun(server: McpServer): void {
       if (traceSummary) result.trace_summary = traceSummary;
       if (traceUnavailable) result.trace_unavailable = true;
 
-      // Feature G — post-conditions. Verify here so no second command is needed.
+      // Post-conditions. Verify here so no second command is needed.
       let assertOk = true;
       if (expect) {
         const checks = evaluate(expect as Expectation, res, workdir, filesChanged);

@@ -1,4 +1,4 @@
-/** Feature H — effects as data. File changes via git porcelain before/after diff. */
+/** Effects as data. File changes via git porcelain before/after diff. */
 
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
@@ -45,7 +45,7 @@ export function gitStatus(cwd: string): Set<string> | null {
 }
 
 /**
- * Effects-as-data from a TRACE instead of git (feature A × H). When a command ran
+ * Effects-as-data from a TRACE instead of git (syscall trace × effects-as-data). When a command ran
  * under a tracer we already know exactly which paths it wrote AND removed — derive
  * files_changed straight from that, scoped to `cwd`. This is cheaper than `git
  * status` (no worktree scan), more precise (catches untracked/ignored paths), and

@@ -1,5 +1,5 @@
 /**
- * Feature J — addressable output, disk-backed so sh_detail survives a restart.
+ * Addressable output store, disk-backed so sh_detail survives a restart.
  *
  * Records live in an in-memory cache (hot path) AND are persisted to a per-project
  * directory under the OS state location. A prior design kept records only in memory,

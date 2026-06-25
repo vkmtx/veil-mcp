@@ -3,7 +3,7 @@
 Both are **opt-in** per `sh_run` call. The default path uses neither and works
 everywhere.
 
-## Sandbox (feature K / K+)
+## Sandbox (kernel enforcement)
 
 Real kernel-level write confinement for a single risky command. `sh_run`'s `sandbox`
 option:
@@ -29,7 +29,7 @@ A namespace-free Linux backend via **Landlock** is on the [[Roadmap]] to cover t
 container case. The sandbox is an opt-in best-effort layer, not a headline guarantee —
 it never runs unconfined silently.
 
-## Trace (feature A)
+## Trace (structured syscall trace)
 
 A structured FS/syscall trace, **best-effort** (Linux `strace`):
 

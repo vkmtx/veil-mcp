@@ -1,5 +1,5 @@
 /**
- * Feature C — checkpoint / rollback.
+ * Checkpoint / rollback.
  *
  * A cheap working-tree safety net for an autonomous agent: snapshot a directory
  * before a risky operation, restore it if things go wrong. Implemented with rsync
@@ -100,7 +100,7 @@ export interface CheckpointInfo {
 const EXCLUDE_NAMES = [".git", "node_modules"];
 
 /**
- * Feature C+ — try an APFS copy-on-write clone (`cp -c`): instant and space-free
+ * Atomic checkpoint — try an APFS copy-on-write clone (`cp -c`): instant and space-free
  * on the same volume, the "atomic snapshot" the rsync mirror only approximated.
  * Returns true on success; false (leaving no partial dest) if clonefile isn't
  * possible (non-APFS, cross-volume, older macOS) so the caller falls back to rsync.

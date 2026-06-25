@@ -1,5 +1,5 @@
 /**
- * Feature G — inline assertions / post-conditions.
+ * Inline assertions / post-conditions.
  *
  * Lets one sh_run both execute AND verify, so the agent doesn't fire a second
  * command (ls / grep / git status) just to confirm the first worked. Each check

@@ -57,25 +57,25 @@ evaluate `assert`, and store the record for `sh_detail`.
 
 | Feature                         | Status | Lives in                       |
 |---------------------------------|--------|--------------------------------|
-| **I** token-aware output        | done   | `render.ts`, `tools/sh_run.ts` |
+| **token-aware rendering**       | done   | `render.ts`, `tools/sh_run.ts` |
 | output honesty (signal/trunc/binary) | done | `signals.ts`, `render.ts`, `exec.ts`, `tools/sh_run.ts` |
-| **J** addressable output        | done   | `store.ts`, `tools/sh_detail.ts` |
-| **J+** disk-backed store (restart-safe, TTL) | done | `store.ts` (per-project dir, atomic ids, best-effort) |
+| **addressable output store**    | done   | `store.ts`, `tools/sh_detail.ts` |
+| **disk-backed store** (restart-safe, TTL) | done | `store.ts` (per-project dir, atomic ids, best-effort) |
 | zero-friction setup (`veil init`) | done | `init.ts` + `index.ts` |
-| **H** effect diff               | done   | `effects.ts`                   |
+| **effects-as-data diff**        | done   | `effects.ts`                   |
 | timeout + output cap (safety)   | done   | `exec.ts`, `config.ts`         |
-| **G** inline assertions         | done   | `assert.ts` + `sh_run` `expect` |
-| **M** declarative retry/timeout | done   | `exec.ts` `runWithRetry` + `sh_run` |
-| **B / K-lite** static safety pre-check + blast-radius (segment-aware; not an execution dry-run) | done | `classify.ts` (`splitSegments`/`aggregate`/`classifyAtom`) + `tools/sh_plan.ts` |
-| **C** checkpoint / rollback     | done   | `snapshot.ts` (APFS clone / rsync fallback) + `tools/sh_snapshot.ts` |
-| **K** sandbox enforcement       | done (macOS) | `policy.ts` (sandbox-exec SBPL) + `sh_run` `sandbox` |
-| **K-read** secret read-confine  | done (macOS; Linux via `--tmpfs`) | `policy.ts` (`denyRead` → `deny file-read*` / `--tmpfs`) + `sh_run` `sandbox.protect_secrets`/`deny_read` |
-| **P** dry-run preview (CoW clone, real cwd untouched) | done | `snapshot.ts` `cloneForPreview` + `effects.ts` `cloneDiff` + `sh_run` `preview` |
-| **HIST** descriptive run history | done | `store.ts` `all()` + `tools/sh_history.ts` (+ `at` timestamp on `RunRecord`) |
-| **C+** atomic CoW checkpoints   | done (macOS) | `snapshot.ts` APFS `clonefile` (`cp -c`) + rsync fallback |
-| **K+** Linux sandbox backend    | experimental | `policy.ts` `buildBwrapArgs` (bubblewrap); arg-builder unit-tested, live write-confine covered by a Linux CI test (`test/smoke.ts`, Ubuntu leg) |
-| **K++** namespace-free Linux sandbox (Landlock) | experimental | `policy.ts` `buildLandrunArgs` + `hasLandlock` (via `landrun`, kernel 5.13+); covers containers/CI without user namespaces. Write-confine only — refuses network-deny / read-confine. Arg-builder unit-tested; fail-closed self-test |
-| **A** structured trace          | experimental | `trace.ts` (strace summarizer, best-effort) + `sh_run` `trace`; capture validated on Linux CI |
+| **inline assertions**           | done   | `assert.ts` + `sh_run` `expect` |
+| **declarative retry/timeout**   | done   | `exec.ts` `runWithRetry` + `sh_run` |
+| **dry-run plan / static classification** static safety pre-check + blast-radius (segment-aware; not an execution dry-run) | done | `classify.ts` (`splitSegments`/`aggregate`/`classifyAtom`) + `tools/sh_plan.ts` |
+| **checkpoint / rollback**       | done   | `snapshot.ts` (APFS clone / rsync fallback) + `tools/sh_snapshot.ts` |
+| **sandbox enforcement**         | done (macOS) | `policy.ts` (sandbox-exec SBPL) + `sh_run` `sandbox` |
+| **secret read-confine**         | done (macOS; Linux via `--tmpfs`) | `policy.ts` (`denyRead` → `deny file-read*` / `--tmpfs`) + `sh_run` `sandbox.protect_secrets`/`deny_read` |
+| **dry-run preview** (CoW clone, real cwd untouched) | done | `snapshot.ts` `cloneForPreview` + `effects.ts` `cloneDiff` + `sh_run` `preview` |
+| **run history**                 | done | `store.ts` `all()` + `tools/sh_history.ts` (+ `at` timestamp on `RunRecord`) |
+| **atomic CoW checkpoints**      | done (macOS) | `snapshot.ts` APFS `clonefile` (`cp -c`) + rsync fallback |
+| **Linux sandbox backend**       | experimental | `policy.ts` `buildBwrapArgs` (bubblewrap); arg-builder unit-tested, live write-confine covered by a Linux CI test (`test/smoke.ts`, Ubuntu leg) |
+| **namespace-free Linux sandbox** (Landlock) | experimental | `policy.ts` `buildLandrunArgs` + `hasLandlock` (via `landrun`, kernel 5.13+); covers containers/CI without user namespaces. Write-confine only — refuses network-deny / read-confine. Arg-builder unit-tested; fail-closed self-test |
+| **structured syscall trace**    | experimental | `trace.ts` (strace summarizer, best-effort) + `sh_run` `trace`; capture validated on Linux CI |
 
 ## Boundary: what this layer can and cannot guarantee
 

@@ -1,4 +1,4 @@
-/** Feature I — token-aware rendering. Quiet by default; head+tail when verbose. */
+/** Token-aware rendering. Quiet by default; head+tail when verbose. */
 
 import { config } from "./config.js";
 import { extractSignals } from "./signals.js";
@@ -32,7 +32,7 @@ export function lineCount(s: string): number {
 /**
  * Condense a stream for inline display. Short streams pass through whole; long
  * ones become head + an elision pointer (+ any salient hidden-region lines) +
- * tail. The hidden lines stay retrievable via sh_detail (feature J).
+ * tail. The hidden lines stay retrievable via sh_detail (addressable output store).
  *
  * When `opts.truncated` is set the underlying buffer kept only the TAIL (oldest
  * bytes dropped at the byte cap), so its first physical line is a torn mid-stream
