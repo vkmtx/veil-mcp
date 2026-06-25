@@ -10,7 +10,8 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
 import { extractSignals } from "../src/signals.js";
-import { diffStatus, effectsFromTrace } from "../src/effects.js";
+import { diffStatus, effectsFromTrace, gitToplevel } from "../src/effects.js";
+import { withRepoLock } from "../src/repolock.js";
 import { sandboxAvailable, buildProfile, buildBwrapArgs, buildLandrunArgs, defaultSecretPaths, scrubSecretEnv } from "../src/policy.js";
 import { looksInteractive, classify } from "../src/classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
@@ -1022,6 +1023,66 @@ const shPath = resolveBin("sh");
 check("resolveBin returns an existing absolute path for a real bin", shPath.startsWith("/") && existsSync(shPath));
 // …and an unknown name falls back to the bare name (PATH lookup at exec time).
 check("resolveBin falls back to the bare name when not found", resolveBin("veil-no-such-bin-xyz") === "veil-no-such-bin-xyz");
+
+// ── 33) OGL-97 — per-repo effect-diff serialization (cross-attribution fix). Two
+// sh_run calls fired CONCURRENTLY in the SAME repo, each sleeping then writing a
+// DISTINCT untracked file: without the per-repo lock their before/after git-status
+// windows overlap and each run's files_changed wrongly absorbs the OTHER's write.
+// With withRepoLock keyed on gitToplevel, each run must see only its own write. ──
+const cxRepo = mkdtempSync(join(tmpdir(), "veil-concur-"));
+execSync("git init -q && git config user.email t@t.co && git config user.name t", { cwd: cxRepo, shell: "/bin/bash" });
+writeFileSync(join(cxRepo, "a.txt"), "base\n");
+execSync("git add -A && git commit -qm init", { cwd: cxRepo, shell: "/bin/bash" });
+const cxT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env } });
+const cxC = new Client({ name: "smoke-concur", version: "0.0.0" });
+await cxC.connect(cxT);
+// ONE client, both calls in flight at once — the sleeps guarantee the windows would
+// overlap if the lock weren't serializing them.
+const [cxA, cxB] = await Promise.all([
+  cxC.callTool({ name: "sh_run", arguments: { command: "sleep 0.4; echo a > a-new.txt", cwd: cxRepo } }).then((r) => JSON.parse(text(r))),
+  cxC.callTool({ name: "sh_run", arguments: { command: "sleep 0.4; echo b > b-new.txt", cwd: cxRepo } }).then((r) => JSON.parse(text(r))),
+]);
+check(
+  "concurrent same-repo run A sees only its own write (no cross-attribution)",
+  Array.isArray(cxA.files_changed) && cxA.files_changed.some((l: string) => l.includes("a-new.txt")) && !cxA.files_changed.some((l: string) => l.includes("b-new.txt")),
+);
+check(
+  "concurrent same-repo run B sees only its own write (no cross-attribution)",
+  Array.isArray(cxB.files_changed) && cxB.files_changed.some((l: string) => l.includes("b-new.txt")) && !cxB.files_changed.some((l: string) => l.includes("a-new.txt")),
+);
+await cxC.close();
+rmSync(cxRepo, { recursive: true, force: true });
+
+// ── 33b) withRepoLock unit — same key serializes (no interleave), different keys may
+// overlap. Each fn pushes a start then (after a tick) an end marker; under the lock,
+// same-key order must be [startA,endA,startB,endB], never interleaved. ──
+const lockOrder: string[] = [];
+const lockBody = (tag: string) => async () => {
+  lockOrder.push(`start${tag}`);
+  await new Promise((r) => setTimeout(r, 30));
+  lockOrder.push(`end${tag}`);
+};
+await Promise.all([withRepoLock("/same", lockBody("A")), withRepoLock("/same", lockBody("B"))]);
+check("withRepoLock serializes same-key calls (no interleave)", JSON.stringify(lockOrder) === JSON.stringify(["startA", "endA", "startB", "endB"]));
+// different keys are free to overlap — both start before either ends.
+const diffOrder: string[] = [];
+const diffBody = (tag: string) => async () => {
+  diffOrder.push(`start${tag}`);
+  await new Promise((r) => setTimeout(r, 30));
+  diffOrder.push(`end${tag}`);
+};
+await Promise.all([withRepoLock("/k1", diffBody("A")), withRepoLock("/k2", diffBody("B"))]);
+check("withRepoLock lets different keys overlap", diffOrder.indexOf("startB") < diffOrder.indexOf("endA"));
+
+// ── 33c) gitToplevel unit — in a git dir it returns the realpath'd top-level; in a
+// non-git dir it returns null (best-effort key derivation). ──
+const gtRepo = mkdtempSync(join(tmpdir(), "veil-gittop-"));
+execSync("git init -q", { cwd: gtRepo, shell: "/bin/bash" });
+check("gitToplevel returns the repo realpath in a git dir", gitToplevel(gtRepo) === realpathSync(gtRepo));
+const gtPlain = mkdtempSync(join(tmpdir(), "veil-notgit-"));
+check("gitToplevel returns null outside a git repo", gitToplevel(gtPlain) === null);
+rmSync(gtRepo, { recursive: true, force: true });
+rmSync(gtPlain, { recursive: true, force: true });
 
 rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? `\nALL PASS (${total} assertions)` : `\n${failures}/${total} FAILED`);

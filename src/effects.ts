@@ -5,6 +5,30 @@ import { realpathSync } from "node:fs";
 import { resolve, relative, join } from "node:path";
 import { resolveBin } from "./binpath.js";
 
+/**
+ * Canonical git top-level dir for cwd (`git rev-parse --show-toplevel`, realpath'd),
+ * or null when cwd is not a git repo. This is the repo key used to serialize the
+ * before/after effect-diff window so concurrent same-repo runs don't cross-attribute
+ * each other's writes. Best-effort: any failure (not a repo, git missing) → null.
+ */
+export function gitToplevel(cwd: string): string | null {
+  try {
+    const top = execFileSync(resolveBin("git"), ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (!top) return null;
+    try {
+      return realpathSync(top);
+    } catch {
+      return resolve(top);
+    }
+  } catch {
+    return null; // not a git repo, or git unavailable
+  }
+}
+
 /** Returns the set of porcelain status lines, or null if cwd is not a git repo. */
 export function gitStatus(cwd: string): Set<string> | null {
   try {

@@ -4,7 +4,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { config } from "../config.js";
 import { runWithRetry } from "../exec.js";
-import { gitStatus, diffStatus, effectsFromTrace, cloneDiff } from "../effects.js";
+import { gitStatus, gitToplevel, diffStatus, effectsFromTrace, cloneDiff } from "../effects.js";
+import { withRepoLock } from "../repolock.js";
 import { condense, lineCount } from "../render.js";
 import { nextId, put } from "../store.js";
 import { evaluate, type Expectation } from "../assert.js";
@@ -12,11 +13,22 @@ import { sandboxAvailable, wrapCommand, defaultSecretPaths, scrubSecretEnv, type
 import { cloneForPreview, dropPreview, type PreviewClone } from "../snapshot.js";
 import { classify, looksInteractive } from "../classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace, type TraceSummary } from "../trace.js";
-import { mkdtempSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, statSync, realpathSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const pathOrPaths = z.union([z.string(), z.array(z.string())]);
+
+/** Canonical (symlink-free) absolute path, falling back to a plain resolve. Used as
+ *  the repo-lock key when a workdir isn't a git repo, so the same dir reached via a
+ *  symlink still maps to one lock. */
+function canonicalPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
 
 /** Expand a leading `~`/`~/` to $HOME so secret paths can be given tilde-style. */
 function expandTilde(p: string): string {
@@ -296,53 +308,81 @@ export function registerShRun(server: McpServer): void {
       // Preview derives effects from a clone-vs-origin tree diff (below), so it never
       // takes git snapshots of the (cloned) workdir.
       const useTrace = traceDir !== undefined;
-      const before = !previewClone && !useTrace && trackEffects ? gitStatus(workdir) : null;
-      let res = await runWithRetry(toRun, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec, childEnv);
+      // Only the plain git-diff effect path is racy under concurrency: it snapshots
+      // `git status` before and after, so a parallel run writing into the SAME repo
+      // mid-window gets cross-attributed. Preview is clone-isolated and trace is
+      // per-process, so neither needs serialization.
+      const useGitDiff = !previewClone && !useTrace && trackEffects;
 
-      // Trace reconciliation — BEFORE computing effects so files_changed reflects the
-      // run that actually happened (including a re-run).
-      let traceText: string | undefined;
-      let traceSummary: TraceSummary | undefined;
-      if (traceDir) {
-        const tracePath = join(traceDir, "trace");
-        if (existsSync(tracePath)) {
-          // strace created its output → it initialized and exec'd the command, so
-          // res.exit is the command's. Summarize (an empty trace is fine).
-          try {
-            traceText = readFileSync(tracePath, "utf8");
-            traceSummary = summarizeTrace(traceText);
-          } catch {
+      // The whole before→run→after sequence, returning its results so they stay
+      // typed for the result-building below. On the git-diff path this runs under a
+      // per-repo lock (see the caller) so same-repo effect-tracked runs serialize and
+      // don't steal each other's writes; off that path it runs directly, fully
+      // concurrent. Escape hatches if serialization is unwanted: trace:true is
+      // per-process (immune), and VEIL_EFFECTS=0 disables the diff entirely.
+      interface EffectWindow {
+        res: Awaited<ReturnType<typeof runWithRetry>>;
+        filesChanged: string[] | null;
+        traceText: string | undefined;
+        traceSummary: TraceSummary | undefined;
+      }
+      const runEffectWindow = async (): Promise<EffectWindow> => {
+        const before = useGitDiff ? gitStatus(workdir) : null;
+        let res = await runWithRetry(toRun, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec, childEnv);
+
+        // Trace reconciliation — BEFORE computing effects so files_changed reflects the
+        // run that actually happened (including a re-run).
+        let traceText: string | undefined;
+        let traceSummary: TraceSummary | undefined;
+        if (traceDir) {
+          const tracePath = join(traceDir, "trace");
+          if (existsSync(tracePath)) {
+            // strace created its output → it initialized and exec'd the command, so
+            // res.exit is the command's. Summarize (an empty trace is fine).
+            try {
+              traceText = readFileSync(tracePath, "utf8");
+              traceSummary = summarizeTrace(traceText);
+            } catch {
+              traceUnavailable = true;
+            }
+          } else {
+            // strace never created the file → it failed BEFORE exec → the command did
+            // NOT run and res.exit is strace's, not the command's. Re-run untraced to
+            // recover the true result — tracing must never change a command's outcome.
+            // (No double-execution: an absent file means the command never ran.)
+            res = await runWithRetry(preTraceCmd, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec, childEnv);
             traceUnavailable = true;
           }
-        } else {
-          // strace never created the file → it failed BEFORE exec → the command did
-          // NOT run and res.exit is strace's, not the command's. Re-run untraced to
-          // recover the true result — tracing must never change a command's outcome.
-          // (No double-execution: an absent file means the command never ran.)
-          res = await runWithRetry(preTraceCmd, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec, childEnv);
-          traceUnavailable = true;
+          rmSync(traceDir, { recursive: true, force: true });
         }
-        rmSync(traceDir, { recursive: true, force: true });
-      }
 
-      let filesChanged: string[] | null;
-      if (previewClone) {
-        // The command ran in the clone — report how the clone diverged from origin
-        // (cwd-relative writes only). The clone is dropped after asserts, since
-        // expect.file_exists/file_absent must still resolve against it.
-        filesChanged = cloneDiff(origin, previewClone.path);
-      } else if (useTrace) {
-        // Trace ran → derive effects from what it actually wrote AND removed/renamed
-        // (cwd-scoped). Residual honesty scope: a write through an ALREADY-OPEN fd
-        // (inherited/dup'd across the trace boundary) and exotic mutating syscalls
-        // are not captured, so files_changed is complete for create/write/delete/
-        // rename but still best-effort overall. If the trace failed to capture, there
-        // are no git snapshots to fall back to → null.
-        filesChanged = traceSummary ? effectsFromTrace(traceSummary.wrote, traceSummary.deleted, workdir) : null;
-      } else {
-        const after = trackEffects ? gitStatus(workdir) : null;
-        filesChanged = diffStatus(before, after);
-      }
+        let filesChanged: string[] | null;
+        if (previewClone) {
+          // The command ran in the clone — report how the clone diverged from origin
+          // (cwd-relative writes only). The clone is dropped after asserts, since
+          // expect.file_exists/file_absent must still resolve against it.
+          filesChanged = cloneDiff(origin, previewClone.path);
+        } else if (useTrace) {
+          // Trace ran → derive effects from what it actually wrote AND removed/renamed
+          // (cwd-scoped). Residual honesty scope: a write through an ALREADY-OPEN fd
+          // (inherited/dup'd across the trace boundary) and exotic mutating syscalls
+          // are not captured, so files_changed is complete for create/write/delete/
+          // rename but still best-effort overall. If the trace failed to capture, there
+          // are no git snapshots to fall back to → null.
+          filesChanged = traceSummary ? effectsFromTrace(traceSummary.wrote, traceSummary.deleted, workdir) : null;
+        } else {
+          const after = trackEffects ? gitStatus(workdir) : null;
+          filesChanged = diffStatus(before, after);
+        }
+        return { res, filesChanged, traceText, traceSummary };
+      };
+
+      // Serialize the snapshot→run→snapshot window per repository on the git-diff path.
+      // Key on the git top-level dir (the repo root) so runs in different repos never
+      // block each other; fall back to the canonical workdir if it can't be resolved.
+      const { res, filesChanged, traceText, traceSummary } = useGitDiff
+        ? await withRepoLock(gitToplevel(workdir) ?? canonicalPath(workdir), runEffectWindow)
+        : await runEffectWindow();
 
       const id = nextId();
       put(
