@@ -757,6 +757,20 @@ if (sandboxAvailable()) {
   rmSync(psDir, { recursive: true, force: true });
 }
 
+// ── 22f) OGL-103 — preview diff excludes node_modules (perf). A previewed command
+// that writes BOTH a new top-level file AND a file under node_modules must show only
+// the top-level path in files_changed; node_modules is excluded so a big dep tree
+// isn't diffed. Honest tradeoff: writes under node_modules (e.g. `npm install`) are
+// invisible in the preview. Plain temp dir (no git) — exercises the cloneDiff path. ──
+const nmDir = mkdtempSync(join(tmpdir(), "veil-nm-"));
+mkdirSync(join(nmDir, "node_modules"));
+writeFileSync(join(nmDir, "node_modules", "existing.txt"), "dep\n");
+writeFileSync(join(nmDir, "seed.txt"), "seed\n");
+const nm = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo x > made.txt && echo y > node_modules/added.txt", cwd: nmDir, preview: true } })));
+check("preview includes a top-level write", nm.preview === true && Array.isArray(nm.files_changed) && nm.files_changed.some((l: string) => l.includes("made.txt")));
+check("preview excludes node_modules writes from the diff", Array.isArray(nm.files_changed) && !nm.files_changed.some((l: string) => l.includes("node_modules")));
+rmSync(nmDir, { recursive: true, force: true });
+
 await client.close();
 
 // ── 22c) store permissions: persisted records are OWNER-ONLY (no secret leak on

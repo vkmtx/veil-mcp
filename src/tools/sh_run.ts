@@ -407,7 +407,7 @@ export function registerShRun(server: McpServer): void {
         result.preview_warning =
           "ran in a disposable CoW clone of cwd; changes are cwd-RELATIVE only. " +
           "Absolute-path, parent-dir, and network effects are NOT captured and may have happened for REAL. " +
-          "Changes under .git are excluded from the diff (so a previewed commit shows no files_changed). " +
+          ".git and node_modules are excluded from the diff (so a previewed install/commit shows no files_changed for them). " +
           "Nothing was promoted to the real cwd. This is not a sandbox — add sandbox:true for containment.";
       }
       if (traceSummary) result.trace_summary = traceSummary;

@@ -58,13 +58,17 @@ export function effectsFromTrace(wrote: string[], deleted: string[], cwd: string
 
 /**
  * Dry-run preview differ: list how a disposable clone diverged from the origin tree
- * after a command ran inside it. Uses `diff -rq` (excluding the VCS dir, which is
- * noisy and large) and parses its three line shapes into cwd-relative change lines:
+ * after a command ran inside it. Uses `diff -rq` (excluding the VCS dir and
+ * node_modules, both noisy and large) and parses its three line shapes into
+ * cwd-relative change lines:
  *   - "Only in <clone>/sub: name"  → created <sub/name>
  *   - "Only in <origin>/sub: name" → deleted <sub/name>
  *   - "Files <origin>/x and <clone>/x differ" → modified <x>
  * Paths are reported relative to the clone root. This reflects cwd-RELATIVE writes
  * only; out-of-cwd / network effects are invisible here (the caller banners that).
+ * HONEST tradeoff: node_modules is excluded for speed, so a previewed command that
+ * writes UNDER node_modules (e.g. `npm install`) will NOT show those paths in
+ * files_changed.
  */
 export function cloneDiff(origin: string, clone: string): string[] {
   // Canonicalize so the prefix checks below match `diff`'s echoed paths even when
@@ -80,7 +84,7 @@ export function cloneDiff(origin: string, clone: string): string[] {
   const c = canon(clone);
   let out = "";
   try {
-    out = execFileSync(resolveBin("diff"), ["-rq", "--exclude=.git", o, c], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    out = execFileSync(resolveBin("diff"), ["-rq", "--exclude=.git", "--exclude=node_modules", o, c], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {
     // diff exits 1 when trees differ — that's the normal case, output is on stdout.
     const err = e as { status?: number; stdout?: string };
