@@ -1,6 +1,6 @@
 /**
  * Tool: sh_plan — predict a command's blast radius and file effects WITHOUT
- * executing it (feature B dry-run + feature K-lite classification).
+ * executing it (dry-run plan + static classification).
  *
  * Use before a risky command to decide whether to run it, checkpoint first, or
  * ask the user. Best-effort static analysis — see classify.ts for limits.

@@ -1,6 +1,6 @@
 /**
  * Tools: sh_checkpoint / sh_restore / sh_checkpoints — working-tree rollback
- * safety net (feature C). Checkpoint before a risky change; restore to undo it.
+ * safety net (checkpoint / rollback). Checkpoint before a risky change; restore to undo it.
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

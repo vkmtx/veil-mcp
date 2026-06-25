@@ -47,6 +47,6 @@ export interface RunRecord {
   stderr: string;
   /** git porcelain diff lines, or null when cwd is not a git repo. */
   filesChanged: string[] | null;
-  /** full syscall trace text (feature A), when tracing was requested and captured. */
+  /** full syscall trace text (structured syscall trace), when tracing was requested and captured. */
   trace?: string;
 }

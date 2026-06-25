@@ -2,27 +2,27 @@
 
 Status legend: ✅ done · 🧪 experimental · 🔭 planned
 
-| | Feature | Status |
-|---|---------|--------|
-| **I** | token-aware output | ✅ |
-| **J** | addressable output (`sh_detail`, `match`) | ✅ |
-| **J+** | disk-backed record store (survives restart, TTL-pruned) | ✅ |
-| **H** | effect diff (git porcelain / trace-derived) | ✅ |
-| **G** | inline assertions (`expect`) | ✅ |
-| **M** | declarative retry / timeout | ✅ |
-| **B / K-lite** | static safety pre-check + classification (`sh_plan`, segment-aware) | ✅ |
-| **C** | checkpoint / rollback | ✅ |
-| **C+** | atomic CoW checkpoints (APFS `clonefile`) | ✅ |
-| **K** | real sandbox (macOS `sandbox-exec`) | ✅ |
-| — | `veil init` zero-friction setup | ✅ |
-| **K+** | Linux sandbox (bubblewrap) | 🧪 needs unprivileged userns |
-| **A** | structured trace (Linux `strace`) | 🧪 |
-| **K++** | namespace-free Linux sandbox (Landlock) — covers containers/Codespaces | 🔭 [#9](https://github.com/vkmtx/veil-mcp/issues/9) |
-| — | background jobs (`sh_logs` / `sh_stop`) for dev servers / watchers | 🔭 [#10](https://github.com/vkmtx/veil-mcp/issues/10) |
+| Feature | Status |
+|---------|--------|
+| token-aware rendering | ✅ |
+| addressable output store (`sh_detail`, `match`) | ✅ |
+| disk-backed record store (survives restart, TTL-pruned) | ✅ |
+| effects-as-data diff (git porcelain / trace-derived) | ✅ |
+| inline assertions (`expect`) | ✅ |
+| declarative retry / timeout | ✅ |
+| dry-run plan + static classification (`sh_plan`, segment-aware) | ✅ |
+| checkpoint / rollback | ✅ |
+| atomic CoW checkpoints (APFS `clonefile`) | ✅ |
+| real sandbox enforcement (macOS `sandbox-exec`) | ✅ |
+| `veil init` zero-friction setup | ✅ |
+| Linux sandbox (bubblewrap) | 🧪 needs unprivileged userns |
+| structured syscall trace (Linux `strace`) | 🧪 |
+| namespace-free Linux sandbox (Landlock) — covers containers/Codespaces | 🔭 [#9](https://github.com/vkmtx/veil-mcp/issues/9) |
+| background jobs (`sh_logs` / `sh_stop`) for dev servers / watchers | 🔭 [#10](https://github.com/vkmtx/veil-mcp/issues/10) |
 
 ### Known platform risk: macOS sandbox-exec deprecation
 
-The macOS sandbox backend (**K**) relies entirely on `sandbox-exec`, which Apple has
+The macOS sandbox backend relies entirely on `sandbox-exec`, which Apple has
 deprecated. It is the only sandbox mechanism on macOS today.
 
 Why this is currently safe: the honesty contract is fail-closed. If `sandbox-exec`

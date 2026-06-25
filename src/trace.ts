@@ -1,5 +1,5 @@
 /**
- * Feature A — structured trace (lazy, best-effort).
+ * Structured syscall trace (lazy, best-effort).
  *
  * Applies the "effects as data" thesis at the SYSCALL level: instead of guessing a
  * command's file effects statically (classify) or diffing git after (effects), run
@@ -75,7 +75,7 @@ const WRITE_FLAGS = /O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND/;
 
 /**
  * Parse strace `-e trace=file` output into a structured read/write/delete summary.
- * Pure — the testable core of feature A. Lines look like:
+ * Pure — the testable core of the structured syscall trace. Lines look like:
  *   openat(AT_FDCWD, "/path", O_WRONLY|O_CREAT, 0644) = 3
  *   unlink("/path")                         = 0
  *   rename("/old", "/new")                  = 0

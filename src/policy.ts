@@ -1,5 +1,5 @@
 /**
- * Feature K — real sandbox enforcement.
+ * Sandbox enforcement — kernel confinement.
  *
  * Confines a command's blast radius at the KERNEL level, not by static guesswork.
  * On macOS this uses `sandbox-exec` (Seatbelt/SBPL) — unprivileged, no sudo, no

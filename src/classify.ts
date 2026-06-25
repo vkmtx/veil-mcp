@@ -1,5 +1,5 @@
 /**
- * Feature K (lite) + B foundation — static command classification.
+ * Static command classification — the foundation for the dry-run plan.
  *
  * Parses a command string WITHOUT executing it to predict its blast radius and,
  * for known builtins, its file effects. This is best-effort STATIC analysis, not an

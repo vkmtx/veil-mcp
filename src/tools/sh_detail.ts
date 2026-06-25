@@ -11,13 +11,13 @@ export function registerShDetail(server: McpServer): void {
       title: "Pull stored detail for a previous run",
       description:
         "Retrieve full stored output for a previous sh_run by id WITHOUT re-running it " +
-        "(feature J — addressable output). Use after a condensed result hid lines you need.",
+        "(the addressable output store). Use after a condensed result hid lines you need.",
       inputSchema: {
         id: z.string().describe("The run id returned by sh_run (e.g. cmd3)."),
         selector: z
           .enum(["stdout", "stderr", "full", "meta", "trace"])
           .default("full")
-          .describe("Which slice to return. 'trace' returns the full captured syscall trace (feature A)."),
+          .describe("Which slice to return. 'trace' returns the full captured syscall trace."),
         match: z
           .string()
           .optional()

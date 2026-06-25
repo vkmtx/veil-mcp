@@ -17,10 +17,10 @@ export const VERSION: string = (require("../package.json") as { version: string 
 
 export function buildServer(): McpServer {
   const server = new McpServer({ name: "veil-mcp", version: VERSION });
-  registerShRun(server); // exec + I/J/H/G/M + read-confine + preview
-  registerShDetail(server); // J
-  registerShPlan(server); // B + K-lite
-  registerSnapshotTools(server); // C
+  registerShRun(server); // exec + rendering + addressable store + effects + assertions + history + read-confine + preview
+  registerShDetail(server); // addressable output store
+  registerShPlan(server); // dry-run plan + static classification
+  registerSnapshotTools(server); // checkpoint / rollback
   registerShHistory(server); // descriptive run history
   return server;
 }
