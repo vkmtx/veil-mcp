@@ -18,6 +18,8 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { shQuote } from "./shquote.js";
+import { resolveBin } from "./binpath.js";
 
 let cachedTracer: "strace" | null | undefined;
 
@@ -28,7 +30,7 @@ function computeTracer(): "strace" | null {
       // (restrictive yama/seccomp, no CAP_SYS_PTRACE, locked-down container), treat
       // it as ABSENT so tracing degrades cleanly — the command runs unwrapped — rather
       // than strace failing to init and corrupting the command's exit code.
-      execFileSync("strace", ["-f", "-o", "/dev/null", "/bin/true"], { stdio: "ignore" });
+      execFileSync(resolveBin("strace"), ["-f", "-o", "/dev/null", "/bin/true"], { stdio: "ignore" });
       return "strace";
     } catch {
       return null;
@@ -48,10 +50,6 @@ export function traceAvailable(): boolean {
   return tracerBin() !== null;
 }
 
-function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
  * Wrap a command so a tracer records its file syscalls to `tracePath`. Returns the
  * wrapped shell command line, or null if no tracer is available (caller degrades).
@@ -59,7 +57,7 @@ function shQuote(s: string): string {
  */
 export function buildTraceCommand(command: string, tracePath: string): string | null {
   if (tracerBin() !== "strace") return null;
-  return `strace -f -e trace=file -o ${shQuote(tracePath)} /bin/sh -c ${shQuote(command)}`;
+  return `${resolveBin("strace")} -f -e trace=file -o ${shQuote(tracePath)} /bin/sh -c ${shQuote(command)}`;
 }
 
 export interface TraceSummary {

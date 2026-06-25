@@ -3,11 +3,12 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve, relative, join } from "node:path";
+import { resolveBin } from "./binpath.js";
 
 /** Returns the set of porcelain status lines, or null if cwd is not a git repo. */
 export function gitStatus(cwd: string): Set<string> | null {
   try {
-    const out = execFileSync("git", ["status", "--porcelain"], {
+    const out = execFileSync(resolveBin("git"), ["status", "--porcelain"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -79,7 +80,7 @@ export function cloneDiff(origin: string, clone: string): string[] {
   const c = canon(clone);
   let out = "";
   try {
-    out = execFileSync("diff", ["-rq", "--exclude=.git", o, c], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    out = execFileSync(resolveBin("diff"), ["-rq", "--exclude=.git", o, c], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {
     // diff exits 1 when trees differ — that's the normal case, output is on stdout.
     const err = e as { status?: number; stdout?: string };

@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, readdirSync, writeFileSync,
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { resolveBin } from "./binpath.js";
 
 const STORE_ROOT = join(tmpdir(), "veil-checkpoints");
 const PREVIEW_STORE = join(tmpdir(), "veil-previews");
@@ -82,7 +83,7 @@ function containedPath(base: string, label: string): string {
 
 function ensureRsync(): void {
   try {
-    execFileSync("rsync", ["--version"], { stdio: "ignore" });
+    execFileSync(resolveBin("rsync"), ["--version"], { stdio: "ignore" });
   } catch {
     throw new Error("rsync not found — required for checkpoint/restore");
   }
@@ -108,7 +109,7 @@ function tryClone(dir: string, dest: string): boolean {
   if (process.platform !== "darwin") return false;
   try {
     // No dest beforehand → `cp -cR src dest` makes dest a CoW clone of src's tree.
-    execFileSync("cp", ["-cR", dir, dest], { stdio: "ignore" });
+    execFileSync(resolveBin("cp"), ["-cR", dir, dest], { stdio: "ignore" });
     // Prune excludes from the CLONE only (cheap; the CoW source is untouched).
     for (const name of EXCLUDE_NAMES) rmSync(join(dest, name), { recursive: true, force: true });
     return true;
@@ -154,7 +155,7 @@ export function checkpoint(label: string, dir: string): CheckpointInfo {
   } else {
     mkdirSync(dest, { recursive: true });
     // Trailing slash on source copies contents, not the dir itself.
-    execFileSync("rsync", ["-a", "--delete", ...EXCLUDES, `${dir}/`, `${dest}/`], { stdio: "ignore" });
+    execFileSync(resolveBin("rsync"), ["-a", "--delete", ...EXCLUDES, `${dir}/`, `${dest}/`], { stdio: "ignore" });
     method = "rsync";
   }
 
@@ -181,7 +182,7 @@ export function restore(label: string, dir: string): CheckpointInfo {
       );
     }
   }
-  execFileSync("rsync", ["-a", "--delete", ...EXCLUDES, `${src}/`, `${dir}/`], { stdio: "ignore" });
+  execFileSync(resolveBin("rsync"), ["-a", "--delete", ...EXCLUDES, `${src}/`, `${dir}/`], { stdio: "ignore" });
   return { label, dir, path: src };
 }
 
@@ -213,7 +214,7 @@ export function cloneForPreview(dir: string): PreviewClone | null {
   // prunes .git/node_modules) so the previewed command behaves like the real one.
   if (process.platform === "darwin") {
     try {
-      execFileSync("cp", ["-cR", dir, dest], { stdio: "ignore" });
+      execFileSync(resolveBin("cp"), ["-cR", dir, dest], { stdio: "ignore" });
       return { path: dest, method: "clone" };
     } catch {
       rmSync(dest, { recursive: true, force: true });
@@ -222,7 +223,7 @@ export function cloneForPreview(dir: string): PreviewClone | null {
   try {
     ensureRsync();
     mkdirSync(dest, { recursive: true });
-    execFileSync("rsync", ["-a", `${dir}/`, `${dest}/`], { stdio: "ignore" });
+    execFileSync(resolveBin("rsync"), ["-a", `${dir}/`, `${dest}/`], { stdio: "ignore" });
     return { path: dest, method: "rsync" };
   } catch {
     rmSync(base, { recursive: true, force: true });

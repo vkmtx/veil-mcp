@@ -32,6 +32,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { resolve, dirname, basename, join } from "node:path";
+import { shQuote } from "./shquote.js";
+import { resolveBin } from "./binpath.js";
 
 export interface SandboxOpts {
   /** allow network access (default true). false → deny all network. */
@@ -173,7 +175,7 @@ let cachedBwrap: boolean | undefined;
 function hasBwrap(): boolean {
   if (cachedBwrap !== undefined) return cachedBwrap;
   try {
-    execFileSync("bwrap", ["--unshare-pid", "--ro-bind", "/", "/", "/bin/true"], { stdio: "ignore" });
+    execFileSync(resolveBin("bwrap"), ["--unshare-pid", "--ro-bind", "/", "/", "/bin/true"], { stdio: "ignore" });
     cachedBwrap = true;
   } catch {
     cachedBwrap = false;
@@ -211,7 +213,7 @@ function hasLandlock(): boolean {
     // every grant) must not.
     try {
       execFileSync(
-        "landrun",
+        resolveBin("landrun"),
         ["--rox", "/", "--rwx", "/dev", "--rwx", dir, "--", "/bin/sh", "-c", `printf x > ${marker}; printf y > ${escape}`],
         { stdio: "ignore" },
       );
@@ -313,11 +315,6 @@ export function buildProfile(cwd: string, opts: SandboxOpts = {}): string {
   );
 }
 
-/** Single-quote a string for /bin/sh (safe for newlines and embedded double-quotes). */
-function shQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
 /**
  * Build a bubblewrap (Linux) command line for the same write-confine policy:
  * bind the whole filesystem read-only, then re-bind the writable roots rw, give a
@@ -340,7 +337,7 @@ export function buildBwrapArgs(command: string, cwd: string, opts: SandboxOpts =
     .join(" ");
   // --unshare-pid is required for `--proc /proc` to mount (else bwrap exits nonzero).
   return (
-    `bwrap --unshare-pid --ro-bind / / --dev /dev --proc /proc ${binds}${mask ? " " + mask : ""} --chdir ${shQuote(canonical(cwd))} ` +
+    `${resolveBin("bwrap")} --unshare-pid --ro-bind / / --dev /dev --proc /proc ${binds}${mask ? " " + mask : ""} --chdir ${shQuote(canonical(cwd))} ` +
     `${net}--die-with-parent /bin/sh -c ${shQuote(command)}`
   );
 }
@@ -370,7 +367,7 @@ export function buildLandrunArgs(command: string, cwd: string, opts: SandboxOpts
     .join(" ");
   // --rox / : read+exec everywhere; --rwx /dev : writable devices (/dev/null etc.);
   // --rwx <roots> : the only writable filesystem locations.
-  return `landrun --rox / --rwx /dev ${rwx} -- /bin/sh -c ${shQuote(command)}`;
+  return `${resolveBin("landrun")} --rox / --rwx /dev ${rwx} -- /bin/sh -c ${shQuote(command)}`;
 }
 
 /**

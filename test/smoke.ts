@@ -18,6 +18,8 @@ import { runInit } from "../src/init.js";
 import { chooseMethod, checkpoint, restore, list } from "../src/snapshot.js";
 import { CLASSIFY_CORPUS } from "./classify-corpus.js";
 import { runCommand } from "../src/exec.js";
+import { shQuote } from "../src/shquote.js";
+import { resolveBin } from "../src/binpath.js";
 import { TURNS, recallCorpus, recallSurfaced } from "../bench/metrics-data.js";
 import { config } from "../src/config.js";
 
@@ -995,6 +997,17 @@ check("normal run is not flagged memory-only", persisted.stored !== "memory-only
 check("normal run DOES write a record file to disk", recOnDisk(persisted.id));
 await nsClient.close();
 rmSync(nsDir, { recursive: true, force: true });
+
+// ── 31) shQuote (shared) + resolveBin (PATH hardening) units ──
+check("shQuote wraps a plain string", shQuote("hello") === "'hello'");
+// a literal single quote becomes '\'' — close, escaped-quote, reopen.
+check("shQuote escapes an embedded single quote", shQuote("a'b") === "'a'\\''b'");
+check("shQuote keeps newlines inside the quotes", shQuote("a\nb") === "'a\nb'");
+// a real binary in a standard dir resolves to an existing absolute path…
+const shPath = resolveBin("sh");
+check("resolveBin returns an existing absolute path for a real bin", shPath.startsWith("/") && existsSync(shPath));
+// …and an unknown name falls back to the bare name (PATH lookup at exec time).
+check("resolveBin falls back to the bare name when not found", resolveBin("veil-no-such-bin-xyz") === "veil-no-such-bin-xyz");
 
 rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? `\nALL PASS (${total} assertions)` : `\n${failures}/${total} FAILED`);

@@ -11,11 +11,27 @@
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { buildServer } from "./server.js";
+import { buildServer, VERSION } from "./server.js";
 import { runInit } from "./init.js";
 
-// `veil-mcp init` — one-off project setup, not the server. Handle and exit.
-if (process.argv[2] === "init") {
+const USAGE = `veil-mcp — agent-native shell MCP server.
+
+Usage:
+  veil-mcp            run as an MCP server over stdio (default)
+  veil-mcp init       set up veil for the current project
+  veil-mcp --version  print version and exit
+  veil-mcp --help     print this help and exit
+
+With no arguments it speaks the MCP protocol on stdin/stdout.`;
+
+const arg = process.argv[2];
+if (arg === "--version" || arg === "-v") {
+  // CLI flags are handled before the stdio server starts so they print to stdout.
+  console.log(VERSION);
+} else if (arg === "--help" || arg === "-h") {
+  console.log(USAGE);
+} else if (arg === "init") {
+  // `veil-mcp init` — one-off project setup, not the server. Handle and exit.
   runInit();
 } else {
   const server = buildServer();
