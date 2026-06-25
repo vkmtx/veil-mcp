@@ -3,6 +3,61 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
+## [0.7.0] — 2026-06-25
+
+A hardening + capability pass from a full-codebase critical review (16 issues):
+correctness bugs, security/honesty gaps, a major capability, and public-repo polish.
+Test coverage grew from 175 to 371 smoke assertions.
+
+### Added
+- **Background / long-running processes.** `sh_run { background: true }` starts a
+  command that doesn't exit (dev server, `--watch` build) and returns immediately with
+  `id` + `pid` + `status: "running"`. New **`sh_logs`** polls its output incrementally
+  by per-stream byte cursor (`stdout_cursor`/`stderr_cursor`) plus status/exit/signal;
+  new **`sh_kill`** signals the process group (SIGTERM with a 2s→SIGKILL escalation,
+  idempotent after exit). Live children are reaped on server shutdown so a dev server is
+  never orphaned; `VEIL_MAX_BG_PROCS` (default 16) caps concurrency. Background refuses
+  options that need completion (`expect`/`preview`/`trace`/`retries`/`full`/`timeout_ms`).
+- **Env-secret scrub.** `sh_run { scrub_env: true }` strips secret-shaped environment
+  variables (`*_TOKEN`/`*_KEY`/`AWS_*`/provider prefixes/…) before spawn, so the server's
+  own credentials don't flow into the command. Auto-on with `sandbox.protect_secrets`;
+  reports `secrets_env_scrubbed` (a count, never values). Best-effort denylist.
+- **`no_store`.** Keep a sensitive run **memory-only** — addressable via `sh_detail` for
+  the session, never written to disk.
+- **CLI.** `veil-mcp --version` and `--help`.
+- **`VEIL_MAX_STORE_BYTES`** — a total-byte budget for the record store (default 256MB),
+  on top of the existing count cap.
+
+### Changed
+- **Trace effects are complete.** The syscall trace now records deletions, renames, and
+  `mkdir` (not only `open`), so `files_changed` under `trace: true` covers
+  create/write/delete/rename.
+- **Effect-diff attribution under concurrency.** Same-repo runs that derive
+  `files_changed` from `git status` serialize their before→run→after window per
+  repository, so parallel runs never steal each other's changes. Opt out with
+  `trace: true` (per-process) or `VEIL_EFFECTS=0`.
+- **Checkpoints are namespaced per project**, so the same label taken in two different
+  directories no longer clobbers one another.
+- Preview's diff excludes `node_modules` (faster, with the tradeoff bannered).
+- The classifier no longer over-flags a destructive token inside a quoted literal of a
+  non-eval command (`echo "rm -rf /"`), while still flagging anything actually executed
+  (`bash -c …`, `… | sh`, `perl -e …`, command substitution). Guarded by a
+  never-under-flag corpus.
+- Helper binaries (`rsync`/`diff`/`git`/`strace`/`bwrap`/`landrun`/`cp`) resolved to
+  absolute paths (no PATH hijack). Internal feature-letter codes replaced with
+  descriptive names in comments and docs. `shQuote` shared in one module.
+
+### Fixed
+- The timeout SIGTERM→SIGKILL escalation timer is now cancelled when the child exits
+  early, so a stray SIGKILL can't land on a recycled process group.
+- `gitStatus` uses a large buffer (`execFileSync`), so a big dirty/untracked set no
+  longer overflows and silently reports "not a git repo".
+
+### Security
+- Server-environment credentials are no longer handed unconditionally to every child
+  (`scrub_env`); sensitive runs can stay off-disk (`no_store`); secret-dir read-confine
+  is documented as a scoped guarantee.
+
 ## [0.6.0] — 2026-06-23
 
 Four scoped capabilities, each shipping only what its substrate can honestly back
