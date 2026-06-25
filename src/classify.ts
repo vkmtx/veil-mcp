@@ -350,19 +350,74 @@ function aggregate(parts: Classification[]): Classification {
   };
 }
 
+/** Binaries that EXECUTE a string/stdin/script argument as CODE — so a dangerous
+ *  token reaching one (e.g. `bash -c "rm -rf /"`, `… | sh`, `perl -e '…'`,
+ *  `python3 -c '…'`) really runs and must stay destructive even when quoted. Shells
+ *  plus the common scripting interpreters. */
+const EVAL_BINS = new Set([
+  "sh", "bash", "zsh", "dash", "ksh", "ash", "eval",
+  "perl", "python", "python2", "python3", "ruby", "node", "php", "awk", "gawk", "mawk", "lua", "tclsh", "osascript",
+]);
+
+/** Remove the CONTENTS of matched quote pairs (and the quotes), leaving structure.
+ *  So `echo "rm -rf /"` → `echo `, but `rm -rf "$x"` keeps the `rm -rf ` verb. A
+ *  backslash escapes the next char. Used to tell an executed verb from a quoted literal. */
+function stripQuotes(s: string): string {
+  let out = "";
+  let q: '"' | "'" | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) {
+      if (c === "\\" && q === '"') { i++; continue; } // escaped char inside dquotes
+      if (c === q) q = null;
+      continue; // drop quoted content
+    }
+    if (c === "'" || c === '"') { q = c; continue; }
+    if (c === "\\") { out += c + (s[i + 1] ?? ""); i++; continue; }
+    out += c;
+  }
+  return out;
+}
+
+/** Does a code-executing binary (EVAL_BINS) appear ANYWHERE in the quote-stripped
+ *  command? Scanning every token — not just each segment's first word — catches the
+ *  shell however it is reached: after a pipe (`echo … | sh`), a newline, a brace or
+ *  keyword (`{ bash -c … }`, `if …; then bash -c …`), or as an interpreter
+ *  (`perl -e …`). Running on the QUOTE-STRIPPED string means a shell name merely
+ *  mentioned inside a quoted literal doesn't count; an unquoted token that isn't really
+ *  a command only ever KEEPS the destructive label — the safe over-flag direction. */
+function isEvalForm(unquoted: string): boolean {
+  for (const t of tokens(unquoted)) {
+    if (EVAL_BINS.has(t.split("/").pop() ?? "")) return true;
+  }
+  return false;
+}
+
 export function classify(command: string): Classification {
   const cmd = command.trim();
 
-  // Dangerous patterns are checked even inside complex commands.
-  for (const pat of DESTRUCTIVE_TOKENS) {
-    if (pat.test(cmd)) {
+  // Dangerous patterns are checked even inside complex commands. A raw-string match
+  // OVER-flags a token inside a quoted ARGUMENT (`echo "rm -rf /"`), which is the safe
+  // bias but cries wolf. Suppress that ONE case — and only it — when we can prove the
+  // token isn't actually executed: it vanishes once quoted regions are stripped AND the
+  // command neither pipes into / invokes an eval-capable shell NOR contains a command
+  // substitution. Anything executed (`bash -c "rm -rf /"`, `echo "rm -rf /" | sh`,
+  // `echo "$(rm -rf /)"`, or an unquoted `rm -rf /`) stays destructive — never under-flag.
+  const danger = DESTRUCTIVE_TOKENS.find((p) => p.test(cmd));
+  if (danger) {
+    const unquoted = stripQuotes(cmd);
+    const executesQuoted = /\$\(|`|<\(|>\(/.test(cmd) || isEvalForm(unquoted);
+    const tokenOutsideQuotes = DESTRUCTIVE_TOKENS.some((p) => p.test(unquoted));
+    if (tokenOutsideQuotes || executesQuoted) {
       return {
         category: "destructive",
         reversible: false,
         mutations: [{ op: "delete", paths: ["(matched a destructive pattern)"] }],
-        note: `command matches a known-destructive pattern (${pat})`,
+        note: `command matches a known-destructive pattern (${danger})`,
       };
     }
+    // Otherwise the token is a quoted literal of a non-eval command (not executed) —
+    // fall through to normal classification, which judges the real verb.
   }
 
   // Decompose top-level pipelines/lists. A non-null result means the splitter ran

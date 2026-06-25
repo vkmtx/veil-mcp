@@ -30,6 +30,21 @@ export const CLASSIFY_CORPUS: CorpusCase[] = [
   { command: "dd if=/dev/zero of=/dev/sda", minCategory: "destructive" },
   { command: "git reset --hard", minCategory: "destructive" },
   { command: "git push --force-with-lease", minCategory: "destructive" },
+  // ── executed-quoted forms: a dangerous token reaching a shell/interpreter runs ──
+  { command: 'bash -c "rm -rf /"', minCategory: "destructive" },
+  { command: '/bin/bash -c "rm -rf /"', minCategory: "destructive" },
+  { command: 'echo "rm -rf /" | sh', minCategory: "destructive" },
+  { command: 'echo "$(rm -rf /)"', minCategory: "destructive" },
+  // these defeated a first-token-only eval check — the shell isn't the leading word:
+  { command: 'echo hi\nbash -c "rm -rf /"', minCategory: "destructive" },
+  { command: '{ bash -c "rm -rf /"; }', minCategory: "destructive" },
+  { command: 'if true; then bash -c "rm -rf /"; fi', minCategory: "destructive" },
+  { command: `perl -e 'system("rm -rf /")'`, minCategory: "destructive" },
+  { command: `python3 -c 'import os; os.system("rm -rf /")'`, minCategory: "destructive" },
+  { command: `awk 'BEGIN{system("rm -rf /")}'`, minCategory: "destructive" },
+  // ── quoted-literal false positives that must NOT over-flag (non-eval command) ──
+  { command: 'echo "rm -rf /"', minCategory: "read-only", exact: true },
+  { command: "git commit -m 'rm -rf old build'", minCategory: "mutating", exact: true },
   // ── read-only controls: exact ──
   { command: "ls -la", minCategory: "read-only", exact: true },
   { command: "git status", minCategory: "read-only", exact: true },
