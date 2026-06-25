@@ -90,16 +90,32 @@ check("summarizeTrace splits reads vs writes", trSum.wrote.includes("/tmp/out.tx
 // strace -f interrupted syscalls print "<unfinished ...>"; the flags precede it, so writes aren't lost.
 const trUnfin = summarizeTrace('[pid 9] openat(AT_FDCWD, "/tmp/u.txt", O_WRONLY|O_CREAT <unfinished ...>');
 check("summarizeTrace catches unfinished write line", trUnfin.wrote.includes("/tmp/u.txt"));
+// OGL-95: deletions (unlink/rmdir) and rename (source deleted, dest written) are summarized,
+// alongside the openat-write — only when the syscall SUCCEEDED (`= 0`).
+const trDel = summarizeTrace(
+  'unlink("/tmp/gone.txt")                  = 0\n' +
+  'rename("/tmp/old.txt", "/tmp/new.txt")   = 0\n' +
+  'openat(AT_FDCWD, "/tmp/w.txt", O_WRONLY|O_CREAT, 0644) = 5',
+);
+check("summarizeTrace records unlink + rename source as deleted", trDel.deleted.includes("/tmp/gone.txt") && trDel.deleted.includes("/tmp/old.txt"));
+check("summarizeTrace records rename dest + openat-write as wrote", trDel.wrote.includes("/tmp/new.txt") && trDel.wrote.includes("/tmp/w.txt"));
+// honesty: a FAILED unlink (`= -1 ENOENT`) deleted nothing and must not be counted.
+const trFail = summarizeTrace('unlink("/tmp/missing.txt")               = -1 ENOENT (No such file or directory)');
+check("summarizeTrace ignores a failed unlink (= -1 ENOENT)", !trFail.deleted.includes("/tmp/missing.txt") && trFail.deleted.length === 0);
 // effects-from-trace: cwd-scoped writes become files_changed (replaces git when tracing).
-const fxTrace = effectsFromTrace(["/work/a.txt", "/work/sub/b.txt", "/etc/passwd", "/work/a.txt"], "/work");
+const fxTrace = effectsFromTrace(["/work/a.txt", "/work/sub/b.txt", "/etc/passwd", "/work/a.txt"], [], "/work");
 check("effectsFromTrace scopes to cwd, relativizes, dedupes", fxTrace.includes("wrote a.txt") && fxTrace.includes("wrote sub/b.txt") && !fxTrace.some((l) => l.includes("passwd")) && fxTrace.length === 2);
+// OGL-95: deletions are emitted as "deleted <rel>" lines, cwd-scoped like writes —
+// an out-of-cwd removal is dropped, and a write+delete of the same path keeps both.
+const fxDel = effectsFromTrace(["/work/keep.txt"], ["/work/gone.txt", "/etc/shadow", "/work/keep.txt"], "/work");
+check("effectsFromTrace emits cwd-scoped deleted lines", fxDel.includes("wrote keep.txt") && fxDel.includes("deleted gone.txt") && fxDel.includes("deleted keep.txt") && !fxDel.some((l) => l.includes("shadow")));
 // effectsFromTrace canonicalizes cwd: strace records the REAL path, so a symlinked
 // root must still match (else in-cwd writes are silently dropped from files_changed).
 const realDir = realpathSync(mkdtempSync(join(tmpdir(), "veil-fxreal-")));
 const linkDir = join(tmpdir(), `veil-fxlink-${process.pid}`);
 rmSync(linkDir, { force: true });
 symlinkSync(realDir, linkDir);
-const fxSym = effectsFromTrace([join(realDir, "c.txt")], linkDir); // cwd given via the symlink
+const fxSym = effectsFromTrace([join(realDir, "c.txt")], [], linkDir); // cwd given via the symlink
 check("effectsFromTrace matches through a symlinked cwd", fxSym.includes("wrote c.txt"));
 rmSync(linkDir, { force: true });
 rmSync(realDir, { recursive: true, force: true });
@@ -899,6 +915,34 @@ check("namespacing: dir A restores A's marker (not B's)", readFileSync(join(nsA,
 check("namespacing: dir B restores B's marker (not A's)", readFileSync(join(nsB, "marker.txt"), "utf8") === "from-B\n");
 rmSync(nsA, { recursive: true, force: true });
 rmSync(nsB, { recursive: true, force: true });
+
+// ── 30) byte-budget store eviction (OGL-101) — fresh server, small VEIL_MAX_STORE_BYTES,
+// record-count cap large enough NOT to bind, isolated dir. Several runs each emitting
+// >50KB of stdout must blow the byte budget and trim oldest-first: the EARLIEST run's
+// record is gone while the most RECENT stays addressable. ──
+const byDir = mkdtempSync(join(tmpdir(), "veil-bybytes-"));
+const byT = new StdioClientTransport({
+  command: "npx",
+  args: ["tsx", serverEntry],
+  env: { ...process.env, VEIL_STATE_DIR: byDir, VEIL_MAX_STORE_BYTES: "50000", VEIL_MAX_RECORDS: "1000" },
+});
+const byC = new Client({ name: "smoke-bybytes", version: "0.0.0" });
+await byC.connect(byT);
+let byFirstId = "";
+let byLastId = "";
+for (let i = 0; i < 4; i++) {
+  // `seq 1 20000` is ~108KB of stdout — each stored record alone exceeds the 50KB
+  // budget, so eviction must keep only the newest and drop everything older.
+  const r = JSON.parse(text(await byC.callTool({ name: "sh_run", arguments: { command: "seq 1 20000" } })));
+  if (i === 0) byFirstId = r.id;
+  byLastId = r.id;
+}
+const byEvicted = JSON.parse(text(await byC.callTool({ name: "sh_detail", arguments: { id: byFirstId, selector: "stdout" } })));
+check("byte-budget evicts the earliest record", typeof byEvicted.error === "string" && byEvicted.error.includes("unknown id"));
+const byKept = text(await byC.callTool({ name: "sh_detail", arguments: { id: byLastId, selector: "stdout" } }));
+check("byte-budget keeps the most recent record", byKept.split("\n").filter(Boolean).length === 20000);
+await byC.close();
+rmSync(byDir, { recursive: true, force: true });
 
 rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? `\nALL PASS (${total} assertions)` : `\n${failures}/${total} FAILED`);

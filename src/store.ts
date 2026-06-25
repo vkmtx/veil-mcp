@@ -14,9 +14,10 @@
  *  - A record is written to a temp file then atomically RENAMED into place, so a
  *    concurrent reader never observes a half-written/empty record file — a present
  *    `cmdN.json` is always a complete record.
- *  - Old records are pruned by TTL on boot and capped by VEIL_MAX_RECORDS, evicting
- *    the OLDEST by mtime (not by id number, which is not a recency order across
- *    concurrent servers) — bounded disk, never the just-written record.
+ *  - Old records are pruned by TTL on boot and capped by VEIL_MAX_RECORDS (count)
+ *    and VEIL_MAX_STORE_BYTES (total disk), evicting the OLDEST by mtime (not by id
+ *    number, which is not a recency order across concurrent servers) — bounded disk,
+ *    never the just-written record.
  *  - ALL disk I/O is best-effort: if the dir is not writable we degrade to
  *    memory-only and never fail a run. Set VEIL_STATE_DIR=none to force memory-only.
  */
@@ -169,30 +170,47 @@ export function put(rec: RunRecord): void {
   evict();
 }
 
-/** Enforce VEIL_MAX_RECORDS, evicting the OLDEST complete records by mtime. Empty
+/** Enforce VEIL_MAX_RECORDS (by count) and VEIL_MAX_STORE_BYTES (by total size),
+ *  evicting the OLDEST complete records by mtime until BOTH caps hold. Empty
  *  reservation locks are NOT counted, and the just-written record (newest mtime) is
  *  never the one evicted. */
 function evict(): void {
-  if (config.maxRecords <= 0) return;
-  if (dir) {
+  const capRecords = config.maxRecords > 0;
+  const capBytes = config.maxStoreBytes > 0;
+  if (dir && (capRecords || capBytes)) {
     let names: string[];
     try {
       names = readdirSync(dir).filter((f) => /^cmd\d+\.json$/.test(f));
     } catch {
       return;
     }
-    if (names.length <= config.maxRecords) return;
+    // Single readdir+stat pass: capture both mtime and size for every record, and the
+    // running total of bytes, so the count and byte caps work off one sorted list.
+    let total = 0;
     const withTime = names.map((f) => {
-      let mtime = 0;
-      try { mtime = statSync(join(dir, f)).mtimeMs; } catch { /* gone */ }
-      return { f, mtime };
+      let mtime = 0, size = 0;
+      try { const s = statSync(join(dir, f)); mtime = s.mtimeMs; size = s.size; } catch { /* gone */ }
+      total += size;
+      return { f, mtime, size };
     });
     withTime.sort((a, b) => a.mtime - b.mtime); // oldest first
-    for (const { f } of withTime.slice(0, withTime.length - config.maxRecords)) {
+    // Walk oldest-first, evicting until count ≤ maxRecords AND total ≤ maxStoreBytes.
+    // Never touch the last (newest = just-written) entry, mirroring the count-only
+    // invariant that the freshest record is always retained.
+    let count = withTime.length;
+    const lastIdx = withTime.length - 1;
+    for (let i = 0; i < lastIdx; i++) {
+      const overCount = capRecords && count > config.maxRecords;
+      const overBytes = capBytes && total > config.maxStoreBytes;
+      if (!overCount && !overBytes) break;
+      const { f, size } = withTime[i];
       records.delete(f.slice(0, -5));
       try { unlinkSync(join(dir, f)); } catch { /* already gone */ }
+      count--;
+      total -= size;
     }
   }
+  if (config.maxRecords <= 0) return;
   // Memory backstop — ALWAYS cap the in-memory Map, even with a disk store. Records
   // whose disk write failed (a flaky/again-read-only dir) are in `records` but not on
   // disk, so the disk evictor above never trims them and the Map would grow unbounded.

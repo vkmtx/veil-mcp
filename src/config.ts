@@ -39,6 +39,8 @@ export const config = {
   maxStreamBytes: num("VEIL_MAX_STREAM_BYTES", 5_000_000),
   /** max number of run records kept addressable (oldest evicted). 0 = unbounded. */
   maxRecords: num("VEIL_MAX_RECORDS", 500),
+  /** max total bytes of the on-disk record store (oldest evicted). 0 = unbounded. */
+  maxStoreBytes: num("VEIL_MAX_STORE_BYTES", 256 * 1024 * 1024),
   /** base dir for the on-disk record store, so sh_detail survives a server restart.
    *  "" = auto (XDG_STATE_HOME/veil, else ~/.local/state/veil, else $TMPDIR/veil).
    *  "none"/"off"/"memory" = disable disk, keep records in memory only. */

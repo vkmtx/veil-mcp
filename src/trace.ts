@@ -65,31 +65,72 @@ export function buildTraceCommand(command: string, tracePath: string): string | 
 export interface TraceSummary {
   /** total traced syscall lines. */
   syscalls: number;
-  /** distinct paths opened for writing (capped). */
+  /** distinct paths opened for writing, plus rename destinations and created dirs (capped). */
   wrote: string[];
   /** distinct paths opened read-only (capped). */
   read: string[];
+  /** distinct paths removed (unlink/rmdir) or moved-from (rename source), capped. */
+  deleted: string[];
 }
 
 const WRITE_FLAGS = /O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND/;
 
 /**
- * Parse strace `-e trace=file` output into a structured read/write summary. Pure —
- * the testable core of feature A. Lines look like:
+ * Parse strace `-e trace=file` output into a structured read/write/delete summary.
+ * Pure — the testable core of feature A. Lines look like:
  *   openat(AT_FDCWD, "/path", O_WRONLY|O_CREAT, 0644) = 3
+ *   unlink("/path")                         = 0
+ *   rename("/old", "/new")                  = 0
+ *
+ * Only SUCCESSFUL mutating syscalls (`= 0`, or `= <fd>` for open) are recorded; a
+ * failed call (trailing `= -1 ENOENT`, etc.) changed nothing. Quote-grabbing matches
+ * the open/openat style — up to the first closing quote — so it stays consistent and
+ * doesn't try to decode strace's escaped-quote rendering.
  */
 export function summarizeTrace(text: string, cap = 200): TraceSummary {
   const wrote = new Set<string>();
   const read = new Set<string>();
+  const deleted = new Set<string>();
   let syscalls = 0;
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     syscalls++;
-    const m = line.match(/open(?:at)?\([^"]*"([^"]+)"\s*,\s*([^,)]+)/);
-    if (!m) continue;
-    const [, path, flags] = m;
-    if (WRITE_FLAGS.test(flags)) wrote.add(path);
-    else read.add(path);
+
+    const open = line.match(/open(?:at)?\([^"]*"([^"]+)"\s*,\s*([^,)]+)/);
+    if (open) {
+      const [, path, flags] = open;
+      if (WRITE_FLAGS.test(flags)) wrote.add(path);
+      else read.add(path);
+      continue;
+    }
+
+    // Deletions: unlink("P")/unlinkat(AT_FDCWD,"P",…)/rmdir("P"), only when `= 0`.
+    const del = line.match(/(?:unlink(?:at)?|rmdir)\([^"]*"([^"]+)"[^)]*\)\s*=\s*0\b/);
+    if (del) {
+      deleted.add(del[1]);
+      continue;
+    }
+
+    // Renames: source moved-from (deleted), destination written. rename/renameat/
+    // renameat2 all carry "OLD" then "NEW" as their first two quoted args.
+    const ren = line.match(/rename(?:at2?|at)?\([^"]*"([^"]+)"[^"]*"([^"]+)"[^)]*\)\s*=\s*0\b/);
+    if (ren) {
+      deleted.add(ren[1]);
+      wrote.add(ren[2]);
+      continue;
+    }
+
+    // Directory creation counts as a write (a created path). mkdir/mkdirat, `= 0`.
+    const mk = line.match(/mkdir(?:at)?\([^"]*"([^"]+)"[^)]*\)\s*=\s*0\b/);
+    if (mk) {
+      wrote.add(mk[1]);
+      continue;
+    }
   }
-  return { syscalls, wrote: [...wrote].slice(0, cap), read: [...read].slice(0, cap) };
+  return {
+    syscalls,
+    wrote: [...wrote].slice(0, cap),
+    read: [...read].slice(0, cap),
+    deleted: [...deleted].slice(0, cap),
+  };
 }
