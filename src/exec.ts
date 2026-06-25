@@ -5,9 +5,12 @@ import { config } from "./config.js";
 import type { ExecResult } from "./types.js";
 
 /** Accumulates a stream while enforcing a byte cap (keeps the tail, drops oldest). */
-class BoundedBuffer {
+export class BoundedBuffer {
   private chunks: Buffer[] = [];
   private bytes = 0;
+  /** every byte ever pushed, including ones later dropped at the cap. Monotonic;
+   *  used as the byte cursor for incremental log polling (see bgregistry.getLogs). */
+  private everBytes = 0;
   /** newline bytes seen across the WHOLE stream, even those later dropped. */
   private newlines = 0;
   private sawBytes = false;
@@ -21,6 +24,7 @@ class BoundedBuffer {
   push(chunk: Buffer): void {
     if (chunk.length === 0) return;
     this.sawBytes = true;
+    this.everBytes += chunk.length;
     // Count newlines (and detect NUL) on the way in, so the TRUE line count
     // survives even when older chunks are dropped at the byte cap below.
     for (let i = 0; i < chunk.length; i++) {
@@ -65,6 +69,34 @@ class BoundedBuffer {
     if (!this.sawBytes) return 0;
     return this.newlines + (this.lastByte === 0x0a ? 0 : 1);
   }
+
+  /** Monotonic count of ALL bytes ever pushed, including ones dropped at the cap.
+   *  Stable byte cursor for incremental polling: a reader who has consumed up to N
+   *  bytes asks for the slice past N. */
+  get totalBytesEver(): number {
+    return this.everBytes;
+  }
+
+  /** Bytes currently retained (after byte-cap dropping). The retained window is the
+   *  last `retainedBytes` of the `totalBytesEver` stream. */
+  get retainedBytes(): number {
+    return this.bytes;
+  }
+}
+
+/**
+ * The 2s SIGTERM→SIGKILL escalation, shared by the foreground timeout path and the
+ * background kill path. Sends SIGTERM immediately, then schedules an UNREF'd SIGKILL
+ * 2s later (so a child that ignores SIGTERM is still reaped, but the pending timer
+ * never keeps the event loop alive). Returns a canceller that clears the pending
+ * SIGKILL — call it once the child has exited so a stale SIGKILL can't later land on a
+ * recycled process group.
+ */
+export function escalatingKill(killTree: (sig: NodeJS.Signals) => void): () => void {
+  killTree("SIGTERM");
+  const killTimer = setTimeout(() => killTree("SIGKILL"), 2000);
+  killTimer.unref();
+  return () => clearTimeout(killTimer);
 }
 
 export function runCommand(
@@ -90,7 +122,8 @@ export function runCommand(
     const err = new BoundedBuffer(config.maxStreamBytes);
     let timedOut = false;
     let settled = false;
-    let killTimer: NodeJS.Timeout | null = null;
+    // Canceller for the pending SIGKILL of the escalation, set when the timeout fires.
+    let cancelKill: (() => void) | null = null;
 
     /** Signal the child's whole process group; fall back to the lone child. */
     const killTree = (sig: NodeJS.Signals) => {
@@ -111,12 +144,10 @@ export function runCommand(
       timeoutMs > 0
         ? setTimeout(() => {
             timedOut = true;
-            killTree("SIGTERM");
-            // Hard kill if it ignores SIGTERM. Held so finish() can cancel it —
-            // otherwise a child that exits before +2s leaves the SIGKILL pending,
-            // which could later land on a recycled process group.
-            killTimer = setTimeout(() => killTree("SIGKILL"), 2000);
-            killTimer.unref();
+            // SIGTERM now, SIGKILL in 2s if ignored. The canceller is held so finish()
+            // can clear the pending SIGKILL — otherwise a child that exits before +2s
+            // leaves it pending, which could later land on a recycled process group.
+            cancelKill = escalatingKill(killTree);
           }, timeoutMs)
         : null;
 
@@ -124,7 +155,7 @@ export function runCommand(
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
+      if (cancelKill) cancelKill();
       const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
       const oBin = out.isBinary;
       const eBin = err.isBinary;

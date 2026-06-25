@@ -50,4 +50,8 @@ export const config = {
   /** compute the git effect-diff (two `git status` calls per run). Disable in huge
    *  repos where that is too slow; a `changed` assertion still forces it. */
   effects: bool("VEIL_EFFECTS", true),
+  /** max number of LIVE background processes (sh_run background:true) allowed at once.
+   *  A new background run past this is refused (bg_limit_reached) rather than spawned,
+   *  so a runaway agent can't fork unbounded dev servers. 0 = unbounded. */
+  maxBgProcs: num("VEIL_MAX_BG_PROCS", 16),
 } as const;

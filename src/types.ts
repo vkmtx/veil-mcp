@@ -49,4 +49,10 @@ export interface RunRecord {
   filesChanged: string[] | null;
   /** full syscall trace text (structured syscall trace), when tracing was requested and captured. */
   trace?: string;
+  /** true when the run ended because it was signalled (timeout, or sh_kill of a
+   *  background run). Omitted on a normal exit so existing serialization is unchanged. */
+  killed?: boolean;
+  /** the terminating signal name (e.g. "SIGTERM", "SIGKILL"), when the run was killed
+   *  by a signal. Omitted otherwise so sh_detail meta only shows it when meaningful. */
+  signal?: string;
 }

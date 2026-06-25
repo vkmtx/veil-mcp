@@ -1084,6 +1084,123 @@ check("gitToplevel returns null outside a git repo", gitToplevel(gtPlain) === nu
 rmSync(gtRepo, { recursive: true, force: true });
 rmSync(gtPlain, { recursive: true, force: true });
 
+// ── 34) OGL-100 — background processes (sh_run background:true + sh_logs + sh_kill).
+// The main client is closed; spawn a fresh server like the other late sections. A
+// background run returns IMMEDIATELY with id+pid+status:"running", its output is polled
+// incrementally by byte cursor via sh_logs, and it is stopped (or reaped on its own
+// exit) so its id keeps resolving via the durable store. ──
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const bgDir = mkdtempSync(join(tmpdir(), "veil-bg-state-"));
+const bgT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_STATE_DIR: bgDir } });
+const bgC = new Client({ name: "smoke-bg", version: "0.0.0" });
+await bgC.connect(bgT);
+const bgTools = (await bgC.listTools()).tools.map((t) => t.name);
+check("lists sh_logs + sh_kill", bgTools.includes("sh_logs") && bgTools.includes("sh_kill"));
+
+// 1) background:true returns id+pid+status:"running"+background:true, FAST — well under
+// the command's own 5s duration (it must NOT block until the sleep finishes).
+const bgStart = Date.now();
+const bgRun = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "sleep 5", background: true } })));
+check("background run returns id+pid+status running+background flag", typeof bgRun.id === "string" && typeof bgRun.pid === "number" && bgRun.status === "running" && bgRun.background === true);
+check("background run returns immediately (does not block on the command)", Date.now() - bgStart < 2000);
+
+// 2) sh_logs surfaces emitted lines + a cursor; a second poll with that cursor returns
+// ONLY new output (the cursor advances). The command emits three lines spaced out, then
+// idles, so the first poll catches a prefix and the second catches the remainder.
+const tailRun = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "sh -c 'for i in 1 2 3; do echo line$i; sleep 0.2; done; sleep 5'", background: true } })));
+check("emitting background run starts running", tailRun.status === "running" && typeof tailRun.id === "string");
+// Poll until at least the first line shows (bounded), so we don't race the first echo.
+let firstPoll: any = null;
+for (let i = 0; i < 40; i++) {
+  firstPoll = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: tailRun.id, stream: "stdout" } })));
+  if (typeof firstPoll.stdout === "string" && firstPoll.stdout.includes("line1")) break;
+  await sleepMs(100);
+}
+check("sh_logs surfaces emitted output + status + cursor", firstPoll && firstPoll.status === "running" && typeof firstPoll.stdout_cursor === "number" && firstPoll.stdout_cursor > 0 && String(firstPoll.stdout ?? "").includes("line1"));
+const cursor1 = firstPoll.stdout_cursor;
+// Wait until all three lines have been emitted (cumulative poll from offset 0), so the
+// timing is decided by output, not a fixed sleep.
+let cumulative: any = null;
+for (let i = 0; i < 40; i++) {
+  cumulative = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: tailRun.id, stream: "stdout" } })));
+  if (String(cumulative.stdout ?? "").includes("line3")) break;
+  await sleepMs(100);
+}
+check("sh_logs cumulative output reaches all emitted lines", String(cumulative?.stdout ?? "").includes("line1") && String(cumulative?.stdout ?? "").includes("line3"));
+// An incremental poll FROM cursor1 must not regress the cursor and must NOT repeat line1
+// (line1 was at/before cursor1, so it's outside the [cursor1, end) slice).
+const secondPoll = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: tailRun.id, stdout_cursor: cursor1, stream: "stdout" } })));
+check("sh_logs cursor returns only new output (no repeat of seen lines)", secondPoll.stdout_cursor >= cursor1 && !String(secondPoll.stdout ?? "").includes("line1"));
+
+// 3) sh_kill (SIGTERM) stops a live process → ok; sh_logs/sh_detail then show it
+// exited/killed; a second sh_kill is idempotent (already_exited, not an error).
+const killed = JSON.parse(text(await bgC.callTool({ name: "sh_kill", arguments: { id: tailRun.id, signal: "SIGTERM" } })));
+check("sh_kill SIGTERM on a live run returns ok+killed", killed.ok === true && killed.status === "killed" && killed.signal === "SIGTERM");
+// sh_kill flips status to "killed" SYNCHRONOUSLY, but the durable record is only
+// written when the child actually closes (reap). So poll sh_detail (the store) until
+// the record lands, rather than racing on the live status flip.
+let killedDetail: any = null;
+for (let i = 0; i < 60; i++) {
+  await sleepMs(100);
+  killedDetail = JSON.parse(text(await bgC.callTool({ name: "sh_detail", arguments: { id: tailRun.id, selector: "meta" } })));
+  if (killedDetail.id === tailRun.id && typeof killedDetail.exit === "number") break;
+}
+const postKill = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: tailRun.id, stream: "stdout" } })));
+check("sh_logs shows the killed run as exited/killed", postKill && (postKill.status === "killed" || postKill.status === "exited"));
+check("sh_detail resolves the killed run from the durable store", killedDetail.id === tailRun.id && typeof killedDetail.exit === "number");
+const killAgain = JSON.parse(text(await bgC.callTool({ name: "sh_kill", arguments: { id: tailRun.id, signal: "SIGTERM" } })));
+check("second sh_kill is idempotent (already_exited, not an error)", killAgain.status === "already_exited" && !("error" in killAgain));
+
+// 4) Incompatible options are REFUSED (with background_incompatible) and never spawn.
+const incExpect = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "sleep 5", background: true, expect: { exit: 0 } } })));
+check("background + expect refused with background_incompatible (no spawn)", Array.isArray(incExpect.background_incompatible) && incExpect.background_incompatible.includes("expect") && typeof incExpect.error === "string" && !("id" in incExpect) && !("pid" in incExpect));
+const incTrace = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "sleep 5", background: true, trace: true } })));
+check("background + trace refused with background_incompatible (no spawn)", Array.isArray(incTrace.background_incompatible) && incTrace.background_incompatible.includes("trace") && !("id" in incTrace) && !("pid" in incTrace));
+
+// 5) A short background command that EXITS on its own is flushed to the durable store on
+// exit: after a brief wait its record is addressable via sh_detail with the captured output.
+const quickRun = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "echo hi", background: true } })));
+check("short background command starts running", quickRun.status === "running" && typeof quickRun.id === "string");
+let quickDetail: any = null;
+for (let i = 0; i < 40; i++) {
+  await sleepMs(100);
+  quickDetail = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: quickRun.id, stream: "stdout" } })));
+  if (quickDetail.status !== "running") break;
+}
+check("self-exiting background run becomes exited", quickDetail && quickDetail.status === "exited");
+const quickStdout = text(await bgC.callTool({ name: "sh_detail", arguments: { id: quickRun.id, selector: "stdout" } }));
+check("self-exiting background run addressable via sh_detail with captured output", quickStdout.includes("hi"));
+
+// 6) Shutdown reaping (the riskiest path): a background child must NOT outlive the
+// server. On a DEDICATED server, start a long sleep, capture its pid, then close the
+// transport (the agent disconnecting) and assert the child is reaped — no orphaned
+// dev server holding a port after the agent goes away.
+const reapT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_STATE_DIR: bgDir } });
+const reapC = new Client({ name: "smoke-bg-reap", version: "0.0.0" });
+await reapC.connect(reapT);
+const reapRun = JSON.parse(text(await reapC.callTool({ name: "sh_run", arguments: { command: "sleep 30", background: true } })));
+const reapPid: number = reapRun.pid;
+check("reap test: background child has a pid", typeof reapPid === "number" && reapPid > 0);
+await reapC.close(); // transport closes → server SIGTERMs its live children, then exits
+let reaped = false;
+for (let i = 0; i < 60; i++) {
+  await sleepMs(100);
+  try {
+    process.kill(reapPid, 0); // probe: throws ESRCH once the process group is gone
+  } catch {
+    reaped = true;
+    break;
+  }
+}
+check("background child is reaped when the server shuts down (no orphan)", reaped);
+
+// Cleanup: stop the still-running first bg run (sleep 5) so no detached child outlives
+// the test, then close the client + drop the temp state dir.
+await bgC.callTool({ name: "sh_kill", arguments: { id: bgRun.id, signal: "SIGKILL" } });
+await sleepMs(200);
+await bgC.close();
+rmSync(bgDir, { recursive: true, force: true });
+
 rmSync(STATE_BASE, { recursive: true, force: true });
 console.log(failures === 0 ? `\nALL PASS (${total} assertions)` : `\n${failures}/${total} FAILED`);
 process.exit(failures === 0 ? 0 : 1);
