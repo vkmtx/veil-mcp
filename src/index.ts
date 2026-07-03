@@ -21,15 +21,16 @@ const USAGE = `veil-mcp — agent-native shell MCP server.
 Usage:
   veil-mcp            run as an MCP server over stdio (default)
   veil-mcp init       set up veil for the current project
+  veil-mcp version    print version and exit
   veil-mcp --version  print version and exit
   veil-mcp --help     print this help and exit
 
 With no arguments it speaks the MCP protocol on stdin/stdout.`;
 
 const arg = process.argv[2];
-if (arg === "--version" || arg === "-v") {
+if (arg === "--version" || arg === "-v" || arg === "version") {
   // CLI flags are handled before the stdio server starts so they print to stdout.
-  console.log(VERSION);
+  console.log(`veil-mcp ${VERSION}`);
 } else if (arg === "--help" || arg === "-h") {
   console.log(USAGE);
 } else if (arg === "init") {

@@ -4,7 +4,7 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync, statSync, readdirSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
@@ -318,6 +318,9 @@ check("lists sh_history", tools.includes("sh_history"));
 // hardcoded literal that drifts). server.ts derives it via createRequire.
 const pkgVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 check("server handshake version == package.json", client.getServerVersion()?.version === pkgVersion);
+const expectedVersionLine = `veil-mcp ${pkgVersion}`;
+check("cli --version prints package version", execFileSync("npx", ["tsx", serverEntry, "--version"], { encoding: "utf8" }).trim() === expectedVersionLine);
+check("cli version subcommand prints package version", execFileSync("npx", ["tsx", serverEntry, "version"], { encoding: "utf8" }).trim() === expectedVersionLine);
 
 // 1) quiet success, short output returned whole
 const a = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo hello && echo world" } })));
