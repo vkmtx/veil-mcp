@@ -5,7 +5,7 @@ import { z } from "zod";
 import { config } from "../config.js";
 import { runWithRetry } from "../exec.js";
 import { startBackground } from "../bgregistry.js";
-import { gitStatus, gitToplevel, diffStatus, effectsFromTrace, cloneDiff } from "../effects.js";
+import { gitStatus, gitToplevel, diffStatus, effectsFromTrace, cloneDiff, dirtySignatures, reModified } from "../effects.js";
 import { withRepoLock } from "../repolock.js";
 import { condense, lineCount } from "../render.js";
 import { nextId, put } from "../store.js";
@@ -14,9 +14,29 @@ import { sandboxAvailable, wrapCommand, defaultSecretPaths, scrubSecretEnv, type
 import { cloneForPreview, dropPreview, type PreviewClone } from "../snapshot.js";
 import { classify, looksInteractive } from "../classify.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace, type TraceSummary } from "../trace.js";
-import { mkdtempSync, readFileSync, rmSync, existsSync, statSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, existsSync, statSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, resolve } from "node:path";
+
+/**
+ * Read at most `cap` bytes of a file into memory, from the start. The strace output can
+ * be arbitrarily large, and readFileSync would pull the WHOLE file into heap (and then
+ * onto the persisted record) — unbounded by VEIL_MAX_STREAM_BYTES, which otherwise caps
+ * every stream. Cap at the stream budget and flag truncation. `cap <= 0` means unbounded.
+ */
+function readCapped(path: string, cap: number): { text: string; truncated: boolean } {
+  if (cap <= 0) return { text: readFileSync(path, "utf8"), truncated: false };
+  const size = statSync(path).size;
+  if (size <= cap) return { text: readFileSync(path, "utf8"), truncated: false };
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(cap);
+    const n = readSync(fd, buf, 0, cap, 0);
+    return { text: buf.subarray(0, n).toString("utf8"), truncated: true };
+  } finally {
+    closeSync(fd);
+  }
+}
 
 const pathOrPaths = z.union([z.string(), z.array(z.string())]);
 
@@ -473,22 +493,33 @@ export function registerShRun(server: McpServer): void {
         filesChanged: string[] | null;
         traceText: string | undefined;
         traceSummary: TraceSummary | undefined;
+        traceTruncated: boolean;
       }
       const runEffectWindow = async (): Promise<EffectWindow> => {
         const before = useGitDiff ? gitStatus(workdir) : null;
+        // Content signatures of the currently dirty/untracked paths, so a command that
+        // re-modifies an ALREADY-dirty file (its porcelain status line unchanged) is
+        // still reported — diffStatus alone, comparing status lines, would miss it.
+        const beforeSig = useGitDiff ? dirtySignatures(workdir, before) : new Map<string, string>();
         let res = await runWithRetry(toRun, workdir, timeout_ms ?? config.defaultTimeoutMs, retrySpec, childEnv);
 
         // Trace reconciliation — BEFORE computing effects so files_changed reflects the
         // run that actually happened (including a re-run).
         let traceText: string | undefined;
         let traceSummary: TraceSummary | undefined;
+        let traceTruncated = false;
         if (traceDir) {
           const tracePath = join(traceDir, "trace");
           if (existsSync(tracePath)) {
             // strace created its output → it initialized and exec'd the command, so
-            // res.exit is the command's. Summarize (an empty trace is fine).
+            // res.exit is the command's. Summarize (an empty trace is fine). On retries
+            // this is the LAST attempt's trace (strace -o truncates per run), matching
+            // `res` (also the last attempt) — consistent attribution. Bounded read so a
+            // huge trace can't blow heap/disk (VEIL_MAX_STREAM_BYTES).
             try {
-              traceText = readFileSync(tracePath, "utf8");
+              const capped = readCapped(tracePath, config.maxStreamBytes);
+              traceText = capped.text;
+              traceTruncated = capped.truncated;
               traceSummary = summarizeTrace(traceText);
             } catch {
               traceUnavailable = true;
@@ -520,15 +551,19 @@ export function registerShRun(server: McpServer): void {
           filesChanged = traceSummary ? effectsFromTrace(traceSummary.wrote, traceSummary.deleted, workdir) : null;
         } else {
           const after = trackEffects ? gitStatus(workdir) : null;
-          filesChanged = diffStatus(before, after);
+          const afterSig = trackEffects ? dirtySignatures(workdir, after) : new Map<string, string>();
+          const base = diffStatus(before, after);
+          // Fold in already-dirty files the command re-modified (same porcelain status
+          // line, changed content) — invisible to the status-line diff alone.
+          filesChanged = base === null ? null : [...base, ...reModified(before, after, beforeSig, afterSig)];
         }
-        return { res, filesChanged, traceText, traceSummary };
+        return { res, filesChanged, traceText, traceSummary, traceTruncated };
       };
 
       // Serialize the snapshot→run→snapshot window per repository on the git-diff path.
       // Key on the git top-level dir (the repo root) so runs in different repos never
       // block each other; fall back to the canonical workdir if it can't be resolved.
-      const { res, filesChanged, traceText, traceSummary } = useGitDiff
+      const { res, filesChanged, traceText, traceSummary, traceTruncated } = useGitDiff
         ? await withRepoLock(gitToplevel(workdir) ?? canonicalPath(workdir), runEffectWindow)
         : await runEffectWindow();
 
@@ -599,6 +634,7 @@ export function registerShRun(server: McpServer): void {
           "Nothing was promoted to the real cwd. This is not a sandbox — add sandbox:true for containment.";
       }
       if (traceSummary) result.trace_summary = traceSummary;
+      if (traceTruncated) result.trace_truncated = true;
       if (traceUnavailable) result.trace_unavailable = true;
 
       // Post-conditions. Verify here so no second command is needed.

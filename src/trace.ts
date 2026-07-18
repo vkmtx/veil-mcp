@@ -96,6 +96,11 @@ export function summarizeTrace(text: string, cap = 200): TraceSummary {
 
     const open = line.match(/open(?:at)?\([^"]*"([^"]+)"\s*,\s*([^,)]+)/);
     if (open) {
+      // Skip ONLY an explicit failure (`) = -1 ERRNO`): a failed open never touched the
+      // file, so it must not be recorded as a write (the bug this guards). An UNFINISHED
+      // line (interrupted — "<unfinished ...>", no return yet) is still counted,
+      // conservatively, as before. Mirrors the intent of the `= 0\b` guards below.
+      if (/\)\s*=\s*-1\b/.test(line)) continue; // failed open — changed nothing
       const [, path, flags] = open;
       if (WRITE_FLAGS.test(flags)) wrote.add(path);
       else read.add(path);
