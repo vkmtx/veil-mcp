@@ -172,13 +172,22 @@ check("classify quoted git push --force destructive", classify('git "push" --for
 
 // ── veil-guard hook: bypass anchoring + danger coverage ─────────────────────────
 const guardPath = new URL("../hooks/veil-guard.sh", import.meta.url).pathname;
-function guardExit(command: string): number {
+function guardExitRaw(payload: string): number {
   try {
-    execSync(`/bin/sh '${guardPath}'`, { input: JSON.stringify({ tool_name: "Bash", tool_input: { command } }), stdio: ["pipe", "pipe", "pipe"] });
+    execSync(`/bin/sh '${guardPath}'`, { input: payload, stdio: ["pipe", "pipe", "pipe"] });
     return 0;
   } catch (e: any) {
     return typeof e.status === "number" ? e.status : -1;
   }
+}
+// The VERBOSE class nags once per session_id (marker file in $TMPDIR), so every
+// call defaults to a FRESH session id — pass an explicit one only to exercise the
+// one-shot behavior itself. Markers are cleaned up at the end of this section.
+let guardSeq = 0;
+const guardSidPrefix = `veil-smoke-${process.pid}`;
+function guardExit(command: string, sessionId?: string): number {
+  const session_id = sessionId ?? `${guardSidPrefix}-${guardSeq++}`;
+  return guardExitRaw(JSON.stringify({ tool_name: "Bash", session_id, tool_input: { command } }));
 }
 // Self-gate: the hook needs an interpreter to parse stdin; without it it fails
 // open (exit 0). Assert blocking only where the hook is functional, so a runner
@@ -209,6 +218,28 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   // of the very same tools must still pass through to raw Bash.
   for (const cmd of ["docker ps", "docker logs app", "bun run dev", "npm run start", "deno run --watch x"]) {
     check(`guard: allows passthrough ${cmd}`, guardExit(cmd) === 0);
+  }
+  // Narrowed rm: recursion (or force+glob) is the blast radius — a non-recursive
+  // single-file delete must pass; -r/-R/--recursive and force+glob still block.
+  check("guard: allows plain rm file.txt", guardExit("rm file.txt") === 0);
+  check("guard: allows single-file rm -f build.log", guardExit("rm -f build.log") === 0);
+  check("guard: blocks rm -R dir", guardExit("rm -R dir") === 2);
+  check("guard: blocks force+glob rm -f *.log", guardExit("rm -f *.log") === 2);
+  // One nag per session: same session_id → first verbose call blocks (steer to
+  // sh_run), second is allowed; DANGEROUS still blocks in that same session.
+  const oneshotSid = `${guardSidPrefix}-oneshot-${Date.now()}`;
+  const firstNag = guardExit("npm test", oneshotSid);
+  const secondNag = guardExit("npm test", oneshotSid);
+  check("guard: verbose nags once per session then allows", firstNag === 2 && secondNag === 0);
+  check("guard: dangerous still blocks after verbose marker", guardExit("rm -rf /tmp/x", oneshotSid) === 2);
+  // Fail-open + missing-session_id resilience on raw payloads.
+  check("guard: non-Bash tool fails open", guardExitRaw(JSON.stringify({ tool_name: "Read", tool_input: { file_path: "x" } })) === 0);
+  check("guard: malformed stdin fails open", guardExitRaw("{not json") === 0);
+  check("guard: payload without session_id still blocks dangerous", guardExitRaw(JSON.stringify({ tool_name: "Bash", tool_input: { command: "rm -rf /tmp/x" } })) === 2);
+  // Clean up the one-shot marker files this section created in $TMPDIR.
+  const markDir = process.env.TMPDIR ?? "/tmp";
+  for (const f of readdirSync(markDir)) {
+    if (f.startsWith(`veil-guard-verbose-${guardSidPrefix}`)) rmSync(join(markDir, f), { force: true });
   }
 } else {
   check("guard: SKIPPED (hook not functional in this environment)", true);
@@ -318,6 +349,30 @@ check("lists sh_history", tools.includes("sh_history"));
 // hardcoded literal that drifts). server.ts derives it via createRequire.
 const pkgVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 check("server handshake version == package.json", client.getServerVersion()?.version === pkgVersion);
+
+// 0b) corrective -32602: a sh_run call missing `command` (e.g. sent under a wrong
+// key like `cmd` — zod strips unknown keys before the handler) must fail with a
+// message that teaches the minimal call shape in-band, not a raw zod dump.
+// Depending on SDK version the validation error arrives as an isError tool result
+// or a thrown McpError — accept the corrective message through either channel.
+let missingCmdMsg = "";
+let missingCmdErr = false;
+try {
+  const bad: any = await client.callTool({ name: "sh_run", arguments: { cmd: "echo hi" } });
+  missingCmdErr = bad?.isError === true;
+  missingCmdMsg = String(bad?.content?.[0]?.text ?? "");
+} catch (e: any) {
+  missingCmdErr = true;
+  missingCmdMsg = String(e?.message ?? e);
+}
+// The SDK embeds the zod issues as serialized JSON inside the error text, so the
+// message's own quotes arrive escaped (`missing required \"command\"`). Unescape
+// before matching so the assertion holds through either delivery channel.
+const missingCmdNorm = missingCmdMsg.replace(/\\"/g, '"');
+check(
+  "sh_run without command fails with corrective Minimal-call message",
+  missingCmdErr && missingCmdNorm.includes('Minimal call: {"command"') && missingCmdNorm.includes('missing required "command"'),
+);
 
 // 1) quiet success, short output returned whole
 const a = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo hello && echo world" } })));
