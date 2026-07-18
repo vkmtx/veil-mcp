@@ -14,6 +14,10 @@ sh_run { "command": "./untrusted.sh", "sandbox": { "network": false } }    // al
 sh_run { "command": "./gen.sh",       "sandbox": { "writable": ["out"] } } // extra writable root
 ```
 
+`network: false` unshares the network namespace (no TCP/UDP). On Linux the bubblewrap
+backend additionally masks `/run` and `/var/run` with tmpfs, so a Docker/Podman Unix
+socket on the bound filesystem isn't a way around the network deny.
+
 **Honesty contract:** if a sandbox is requested but unavailable, `sh_run` **refuses to
 run** rather than executing unconfined (sets `sandbox_unavailable: true`).
 

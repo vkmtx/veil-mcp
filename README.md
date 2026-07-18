@@ -21,11 +21,11 @@ result — and adds three things a plain shell simply can't.
 
 You can approximate *most* of veil with Bash + truncation + careful prompting. The
 reason to actually adopt it is the **three things a shell genuinely cannot do** — each
-measured, each reproducible with `npm run metrics`:
+quantified, each reproducible with `npm run metrics`:
 
 | | What you get | The number |
 |--|--|--|
-| ✅&nbsp;**Verify in one call** | `expect: { exit: 0, file_exists: "dist/index.js" }` folds *run → check → grep* into a single call; effects come back typed, so "what changed?" needs no `git status`. | **55% fewer** round-trips (11 → 5 across 5 common tasks) |
+| ✅&nbsp;**Verify in one call** | `expect: { exit: 0, file_exists: "dist/index.js" }` folds *run → check → grep* into a single call; effects come back typed, so "what changed?" needs no `git status`. | **55% fewer** round-trips (11 → 5) — a scenario model over 5 hand-picked common tasks, not a live measurement |
 | ♻️&nbsp;**Checkpoint & roll back** | `sh_checkpoint` / `sh_restore` wrap a risky refactor in an undo — a copy-on-write clone on APFS. | clone **~1.5× faster, ~0 MB** vs a 60 MB rsync copy |
 | 🔒&nbsp;**Kernel sandbox** | `sandbox: true` confines writes to cwd + temp (optionally no network) — and **refuses to run** rather than go unconfined. | **5 / 5** escape attempts blocked (in-cwd write still lands) |
 
@@ -69,10 +69,12 @@ touches only `CLAUDE.md` — see [Adoption](#adoption).
 
 | Tool | What it does |
 |------|--------------|
-| **`sh_run`** | Run a command → quiet structured result: exit, duration, files changed, token-aware stdout/stderr. The workhorse. |
+| **`sh_run`** | Run a command → quiet structured result: exit, duration, files changed, token-aware stdout/stderr. `background: true` starts a long-running process (dev server, `--watch`) and returns `{ id, pid, status: "running" }` immediately instead of blocking. The workhorse. |
+| **`sh_logs`** | Poll a background run's output by id — incremental, per-stream byte cursor (`stdout_cursor`/`stderr_cursor`), plus status/exit/signal. Never re-dumps what was already tailed. |
+| **`sh_kill`** | Stop a background run by id. Signals the whole process group; SIGTERM escalates to SIGKILL after 2s. Killing an already-exited id is idempotent. |
 | **`sh_detail`** | Pull the full stored output of a past run by id — no re-run. Disk-backed, so it survives a server restart. `match=<regex>` greps the stored stream for a value condensing hid. |
 | **`sh_plan`** | Predict a command's blast radius (read-only → destructive) **without running it**. |
-| **`sh_checkpoint` / `sh_restore`** | Snapshot a directory and roll back. Restore refuses a target dir different from where the checkpoint was taken. |
+| **`sh_checkpoint` / `sh_restore`** | Snapshot a directory and roll back. Owner-only (`0700`) storage, published atomically. Restore refuses a target dir different from where the checkpoint was taken. |
 | **`sh_checkpoints`** | List checkpoint labels. |
 | **`sh_history`** | Descriptive aggregates over past runs of a command — observed exit / retry / duration `p50`/`p90` / file-churn, with explicit `n` and recency window. Not a prediction, no causation. |
 
@@ -90,6 +92,11 @@ sh_run { "command": "./untrusted.sh", "sandbox": { "network": false, "protect_se
 
 // dry-run in a CoW clone — see the cwd-relative diff, real cwd untouched
 sh_run { "command": "rm -rf build && npm run generate", "preview": true }
+
+// start a dev server detached, tail its output incrementally, stop it when done
+sh_run  { "command": "npm run dev", "background": true }         // → { id: "cmd12", pid, status: "running" }
+sh_logs { "id": "cmd12", "stdout_cursor": 0 }                     // poll again with the returned cursor for only NEW output
+sh_kill { "id": "cmd12" }                                         // → { status: "terminating" }, settles to exited/killed
 
 // is this command historically slow/flaky here? (descriptive, not a prediction)
 sh_history { "command": "npm test" }
@@ -113,8 +120,11 @@ sh_detail { "id": "cmd9", "selector": "stdout", "match": "ERROR|version=" }
 | `expect` | Post-conditions verified in the same call: `exit`, `stdout_contains`, `stdout_matches`, `stderr_empty`, `file_exists`, `file_absent`, `changed`, `max_ms`. Failures surface in `assert_ok` + `assertions_failed` — no second `ls`/`grep`/`git status`. |
 | `retries` / `retry_on_exit` / `backoff_ms` | Declarative retry; `attempts` is reported when > 1. |
 | `sandbox` | Real OS sandbox. `true` confines file **writes** to cwd + temp; `{ network: false }` also denies network; `{ writable: [...] }` adds roots. `{ protect_secrets: true }` or `{ deny_read: [...] }` also **blocks reads** of configured secret dirs (`~/.ssh`, `~/.aws`, …) — macOS `deny file-read*`, Linux `--tmpfs` mask; sets `secrets_protected: <n>`. Scoped: it blocks the **listed** paths, not a proof against all exfiltration. **Refuses to run** if unavailable — never executes unconfined. Sets `sandboxed: true`. |
-| `preview` | **Dry-run in a disposable CoW clone of cwd** — the command runs *inside* the clone, you get the cwd-relative `files_changed`, and the real cwd is **never touched** (nothing is promoted). Honest scope: absolute-path / parent-dir / network effects are **not** captured and may happen for real — this is **not** a sandbox (combine with `sandbox:true` for containment). **Refuses** if the cwd can't be cloned. Sets `preview: true` + `preview_warning`. |
-| `trace` | Structured FS/syscall trace (Linux `strace`). Surfaces `trace_summary` (paths read/written + syscall count); full trace via `sh_detail selector=trace`. Best-effort: no tracer → command still runs, `trace_unavailable: true`. |
+| `preview` | **Dry-run in a disposable CoW clone of cwd** — the command runs *inside* the clone, you get the cwd-relative `files_changed`, and the real cwd is **never touched** (nothing is promoted). Honest scope: absolute-path / parent-dir / network effects are **not** captured and may happen for real — this is **not** a sandbox (combine with `sandbox:true` for containment). **Refuses** if the cwd can't be cloned. Sets `preview: true` + `preview_warning`; a diff too large to buffer reports `preview_effects_incomplete` rather than silently claiming nothing changed. |
+| `trace` | Structured FS/syscall trace (Linux `strace`). Surfaces `trace_summary` (paths read/written + syscall count); full trace via `sh_detail selector=trace`. Best-effort: no tracer → command still runs, `trace_unavailable: true`. Bounded by `VEIL_MAX_STREAM_BYTES`; an overflowing trace sets `trace_truncated: true`. |
+| `scrub_env` | Strip credential-shaped env vars (`*_TOKEN`/`*_KEY`/`AWS_*`/…) from the child's environment before spawn. Auto-on whenever `sandbox.protect_secrets`/`deny_read` is set. Reports `secrets_env_scrubbed` — a count, values are never echoed. |
+| `no_store` | Keep this run **memory-only**: addressable via `sh_detail` for the session, but never written to disk. Sets `stored: "memory-only"`. |
+| `background` | Start a **long-running process** (dev server, `--watch`) — returns immediately with `{ id, pid, status: "running" }` instead of blocking until exit. Poll with `sh_logs id=<id>`, stop with `sh_kill id=<id>`. No stdin/TTY. **Refused** together with options that need completion (`expect`, `preview`, `trace`, `retries`, `full`, `timeout_ms`); still honors `cwd`/`sandbox`/`scrub_env`/`no_store`. Capped by `VEIL_MAX_BG_PROCS` (default 16); live children are reaped on server shutdown. |
 
 </details>
 
@@ -123,8 +133,11 @@ sh_detail { "id": "cmd9", "selector": "stdout", "match": "ERROR|version=" }
 `id`, `exit`, `ok`, `ms`; then `attempts`, `stdout_lines`/`stderr_lines` (TRUE emitted
 counts), `files_changed`, `timed_out`, `stdout_truncated`/`stderr_truncated`,
 `stdout_binary`/`stderr_binary`, `sandboxed`, `secrets_protected`/`secrets_unprotected`,
-`preview`/`preview_method`/`preview_warning`, `trace_summary`/`trace_unavailable`,
-`assert_ok`/`assertions_failed`, `advice`, `hint`, and the condensed `stdout`/`stderr`.
+`secrets_env_scrubbed`, `stored` (`"memory-only"` under `no_store`), `preview`/
+`preview_method`/`preview_warning`/`preview_effects_incomplete`, `trace_summary`/
+`trace_unavailable`/`trace_truncated`, `assert_ok`/`assertions_failed`, `advice`, `hint`,
+and the condensed `stdout`/`stderr`. A `background: true` run instead returns `id`, `pid`,
+`status: "running"`, and a `hint` pointing at `sh_logs`/`sh_kill`.
 
 </details>
 
@@ -140,9 +153,11 @@ counts), `files_changed`, `timed_out`, `stdout_truncated`/`stderr_truncated`,
 | `VEIL_TIMEOUT_MS` | 120000 | default per-command timeout (0 = none) |
 | `VEIL_MAX_STREAM_BYTES` | 5000000 | max bytes stored per stream (older dropped) |
 | `VEIL_MAX_RECORDS` | 500 | max addressable run records (oldest evicted) |
+| `VEIL_MAX_STORE_BYTES` | 268435456 | total disk-store byte budget (256MB), on top of `VEIL_MAX_RECORDS` — oldest evicted by mtime |
 | `VEIL_STATE_DIR` | auto | record store base (`$XDG_STATE_HOME/veil` → `~/.local/state/veil` → `$TMPDIR/veil`). `none`/`off`/`memory`/`0` = memory-only |
 | `VEIL_RECORD_TTL_MS` | 86400000 | persisted records older than this are pruned on boot (0 = keep) |
 | `VEIL_EFFECTS` | true | compute the git effect-diff (set `0` to skip in huge repos) |
+| `VEIL_MAX_BG_PROCS` | 16 | max concurrent live `background: true` processes |
 
 </details>
 
@@ -170,7 +185,8 @@ contexts. Two opt-in layers harden the risky cases:
 
 - **Kernel sandbox** (`sandbox: true`) — *the real boundary.* Confines writes to
   cwd + temp via macOS `sandbox-exec` (Linux bubblewrap / Landlock, experimental),
-  optionally denies network, blocks reads of secret dirs, and **refuses to run**
+  optionally denies network (Linux bwrap also masks `/run`/`/var/run`, so a Docker/Podman
+  socket isn't a bypass), blocks reads of secret dirs, and **refuses to run**
   rather than go unconfined. Honest scope: solid on macOS; Linux bwrap needs
   unprivileged user namespaces, which containers / Codespaces / Ubuntu 24.04+ often
   restrict — there veil falls back to a **namespace-free Landlock backend** (via
@@ -222,7 +238,7 @@ Don't take the numbers on trust — no account, all local:
 
 ```bash
 git clone https://github.com/vkmtx/veil-mcp && cd veil-mcp && npm install
-npm test          # 285+ smoke assertions over a live stdio server (prints its tally; some platform-gated)
+npm test          # 429+ smoke assertions over a live stdio server (prints its tally; some platform-gated)
 npm run metrics   # the value numbers below
 npm run backtest  # byte-savings regression (bulk-condense ratio + per-command overhead floor)
 npm run bench     # detailed 5-dimension benchmark (economy, latency, per-feature, condense, session)
@@ -230,7 +246,7 @@ npm run bench     # detailed 5-dimension benchmark (economy, latency, per-featur
 
 | Metric | Result | What it measures |
 |--------|--------|------------------|
-| **Agent turns saved** | **55% fewer** round-trips (11 → 5) | MCP calls collapsed by `expect` + effects + retry across 5 common tasks — counts *calls*, not bytes, so it holds as context windows grow |
+| **Agent turns saved** | **55% fewer** round-trips (11 → 5) — a scenario model, not a live measurement | MCP calls collapsed by `expect` + effects + retry across 5 hand-picked common tasks (`bench/metrics-data.ts`) — counts *calls*, not bytes, so it holds as context windows grow |
 | **Sandbox escapes blocked** | **5 / 5** | adversarial outside-cwd / spawned-child / symlink / network writes denied by the kernel; a legitimate in-cwd write still lands (selective, not deny-all) |
 | **Signal recall** | **100%** on 10 fixtures | buried failures surfaced from the elided middle, incl. non-keyword crash idioms |
 | **Checkpoint cost** | clone **~1.5× faster, ~0 MB** vs rsync 60 MB | CoW clone latency + disk vs the rsync mirror (macOS / same-volume APFS) |
@@ -253,7 +269,8 @@ strace), so the Linux-only sandbox and trace paths are exercised too.
 | **K-read / P / HIST** | secret read-confine (`sandbox.protect_secrets`) · dry-run `preview` (CoW clone, real cwd untouched) · descriptive `sh_history` | ✅ done |
 | **K+ / A** | Linux sandbox (bubblewrap) · structured trace (`strace`) | 🧪 experimental — validated on Linux CI |
 | **K++** | namespace-free Linux sandbox (Landlock via `landrun`) — write-confine in containers/Codespaces where bwrap can't | 🧪 experimental — arg-builder unit-tested |
-| — | streaming / PTY + background jobs | 🔭 planned |
+| — | background / long-running processes (`background: true`, `sh_logs`, `sh_kill`) for dev servers / watchers | ✅ done |
+| — | streaming / PTY (interactive processes) | 🔭 planned |
 
 See [CHANGELOG.md](CHANGELOG.md) for version history and [ARCHITECTURE.md](ARCHITECTURE.md)
 for the module/feature map. (Why an MCP server and not a shell fork? Most of the value
@@ -277,7 +294,8 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-*v0.6 — experimental, single-author. Adds read-confine, dry-run preview, run history,
-a namespace-free Landlock sandbox, and an honesty/correctness audit pass
-([CHANGELOG](CHANGELOG.md)): 285+ smoke assertions + backtest + value metrics, green on
-macOS and Linux CI. Judge it by the reproducible suite above, not its age.*
+*v0.7.1 — experimental, single-author. Adds background/long-running processes (`sh_logs` /
+`sh_kill`), env-secret scrubbing (`scrub_env`), memory-only runs (`no_store`), and two
+correctness/security audit passes ([CHANGELOG](CHANGELOG.md)): 429+ smoke assertions +
+backtest + value metrics, green on macOS and Linux CI. Judge it by the reproducible suite
+above, not its age.*

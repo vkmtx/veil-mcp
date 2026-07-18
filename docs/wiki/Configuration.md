@@ -11,9 +11,11 @@ process (e.g. in the agent's MCP config `env` block).
 | `VEIL_MAX_LINE_CHARS` | `1000` | max chars of any single inline line (longer → capped with a pointer) |
 | `VEIL_STDERR_INLINE_ON_FAIL` | `60` | on failure, show up to this many stderr lines inline |
 | `VEIL_TIMEOUT_MS` | `120000` | default per-command timeout (`0` = none) |
-| `VEIL_MAX_STREAM_BYTES` | `5000000` | max bytes stored per stream (older dropped) |
+| `VEIL_MAX_STREAM_BYTES` | `5000000` | max bytes stored per stream (older dropped); also caps a `trace` read (`trace_truncated` on overflow) |
 | `VEIL_MAX_RECORDS` | `500` | max addressable run records (oldest evicted) |
-| `VEIL_STATE_DIR` | auto | on-disk record store base (auto: `$XDG_STATE_HOME/veil` → `~/.local/state/veil` → `$TMPDIR/veil`). `none`/`off` = memory-only |
+| `VEIL_MAX_STORE_BYTES` | `268435456` | total disk-store byte budget (256MB), on top of `VEIL_MAX_RECORDS` — oldest evicted by mtime |
+| `VEIL_MAX_BG_PROCS` | `16` | max concurrent live `background: true` processes |
+| `VEIL_STATE_DIR` | auto | on-disk record store base (auto: `$XDG_STATE_HOME/veil` → `~/.local/state/veil` → `$TMPDIR/veil`). `none`/`off`/`memory`/`0` = memory-only |
 | `VEIL_RECORD_TTL_MS` | `86400000` | persisted records older than this are pruned on boot (`0` = keep) |
 | `VEIL_EFFECTS` | `true` | compute the git effect-diff (set `0` to skip in huge repos) |
 

@@ -11,9 +11,11 @@ export interface Turn {
   why: string;
 }
 
-/** Common agent tasks where structure + effects + expect + retry collapse a
- *  run→check→grep loop into a single call. Counts CALLS, not bytes — the value that
- *  survives growing context windows. */
+/** A SCENARIO MODEL (not a live measurement): common agent tasks where structure +
+ *  effects + expect + retry collapse a run→check→grep loop into a single call. The raw/veil
+ *  counts are hand-derived per task; the headline "~N% fewer round-trips" is this model's
+ *  aggregate, not an empirical benchmark. Counts CALLS, not bytes — the value that survives
+ *  growing context windows. (The measured byte-savings figure comes from the backtest.) */
 export const TURNS: Turn[] = [
   { task: "build + verify artifact exists", raw: 2, veil: 1, why: "raw: build, then `test -f dist/x`; veil: sh_run + expect.file_exists" },
   { task: "run + confirm exit 0, stderr empty", raw: 2, veil: 1, why: "raw: cmd, then inspect $? and stderr; veil: expect.exit + stderr_empty" },
