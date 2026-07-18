@@ -3,6 +3,54 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
+## [0.7.1] — 2026-07-17
+
+A correctness + security follow-up from a full read-only audit. Smoke coverage grew
+from 371 to 429 assertions; the stress harness now fails on an anomaly (was report-only),
+and `typecheck` now also covers `test/` and `bench/`.
+
+### Security
+- **Record-store path traversal closed.** `sh_detail`/`sh_logs` reject any id that isn't a
+  well-formed `cmdN` before it reaches the filesystem, so a crafted id can no longer read a
+  JSON file outside the per-project store.
+- **Checkpoints are private and transactional.** The per-project checkpoint store is now
+  owner-only (`0700`, like the record store), and a snapshot is published atomically (built
+  in a staging sibling, then renamed over the target) so a crash mid-copy can never leave a
+  partial tree that a later restore would apply.
+- **`sandbox { network: false }` (Linux/bubblewrap) also masks Unix sockets.** `--unshare-net`
+  isolates TCP/UDP but left `/run/docker.sock` reachable; `/run` and `/var/run` are now
+  overlaid with tmpfs so a confined command can't reach the host Docker/Podman daemon.
+
+### Fixed
+- **`background: true` with an invalid cwd no longer crashes the server** — the spawn error
+  listener is wired before the early return, so the async failure is absorbed.
+- **`sh_logs` no longer duplicates output after a background run exits.** The durable record
+  keeps per-stream byte totals so a poll after the live→durable handoff returns only new
+  output; slices honor the cursor for binary too and never split a UTF-8 codepoint.
+- **`sh_kill` reports `terminating`** (signal sent) instead of claiming the process is dead
+  with exit 137 before it actually closes.
+- **Children get `/dev/null` stdin** — a command that reads stdin gets EOF instead of hanging
+  to the timeout.
+- **`files_changed` catches a re-modified already-dirty file** (its git status line unchanged),
+  which also fixes `expect.changed` for that case.
+- **Effects honesty:** a syscall trace is bounded by `VEIL_MAX_STREAM_BYTES` (with
+  `trace_truncated`) and no longer counts a failed `open` as a write; a large `preview` diff
+  reports `preview_effects_incomplete` instead of collapsing to "nothing changed".
+- **`BoundedBuffer`** caps a single chunk larger than the byte cap.
+- **Classifier:** a raw newline is now a command separator, and `git config <set>`,
+  branch/tag creation, and `git reflog expire`/`delete` classify as writes (were read-only).
+- **ReDoS guard:** `stdout_matches` and `sh_detail match` refuse catastrophic-backtracking
+  patterns instead of running them on the single-threaded event loop.
+
+### Changed
+- **`veil-guard.sh`** anchors the delete rule to executable position — `echo rm -rf x` and
+  `grep "rm -rf" f` no longer false-block, while `rm -rf`, `sudo rm -rf`, wrapper forms
+  (`timeout`/`nohup`/`nice`/…), and operator/`{`/`do` positions still block.
+- **Release workflow** fails loud (no more silent skip), runs the full gate with `npm ci`,
+  verifies the tag matches `package.json`/`package-lock.json`, smoke-tests the packed
+  tarball, and publishes with npm provenance.
+- **Node engines** bumped to `>=22` (matches CI).
+
 ## [0.7.0] — 2026-06-25
 
 A hardening + capability pass from a full-codebase critical review (16 issues):
