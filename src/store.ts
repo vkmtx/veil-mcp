@@ -39,6 +39,17 @@ function idNum(name: string): number {
   return m ? Number(m[1]) : 0;
 }
 
+/**
+ * A well-formed record id: `cmd` followed by a positive integer with no leading zero
+ * — the ONLY shape nextId() ever mints. Any other value arriving at a public entry
+ * (a user-supplied `sh_detail id=…` / `sh_logs id=…`) is untrusted and must be rejected
+ * BEFORE it reaches join(): otherwise `get("../secret")` resolves to `<dir>/../secret.json`
+ * and reads a JSON file outside the per-project store (path traversal).
+ */
+function isValidId(id: string): boolean {
+  return /^cmd[1-9]\d*$/.test(id);
+}
+
 /** Auto base dir: prefer XDG_STATE_HOME, then ~/.local/state, then the temp dir. */
 function autoBase(): string {
   const xdg = process.env.XDG_STATE_HOME;
@@ -77,9 +88,13 @@ function resolveDir(): string | null {
 const dir = resolveDir();
 
 function recordPath(id: string): string {
+  // Defense-in-depth: every caller already holds an internally-minted id, but never
+  // let an unexpected value reach join() where `..` would escape the store dir.
+  if (!isValidId(id)) throw new Error(`invalid record id: ${JSON.stringify(id)}`);
   return join(dir as string, `${id}.json`);
 }
 function lockPath(id: string): string {
+  if (!isValidId(id)) throw new Error(`invalid record id: ${JSON.stringify(id)}`);
   return join(dir as string, `${id}.json.lock`);
 }
 
@@ -154,6 +169,16 @@ export function nextId(): string {
 }
 
 /**
+ * Best-effort release of an id reservation whose run never produced a record — e.g. a
+ * background spawn that failed before it could put(). Drops the `.lock` sidecar so the
+ * slot isn't leaked; the counter still advances past it, which is fine (ids are opaque).
+ */
+export function releaseId(id: string): void {
+  if (!dir || !isValidId(id)) return;
+  try { unlinkSync(lockPath(id)); } catch { /* no lock / already gone */ }
+}
+
+/**
  * Cache a run record, and (by default) persist its full stdout/stderr to disk so
  * sh_detail survives a server restart.
  *
@@ -177,7 +202,10 @@ export function put(rec: RunRecord, opts?: { persist?: boolean }): void {
     evict();
     return;
   }
-  if (dir) {
+  if (dir && isValidId(rec.id)) {
+    // isValidId guard: every caller passes a nextId()-minted id, but never build a temp
+    // path from an unexpected rec.id — `../evil` would writeFileSync outside the store
+    // before the rename validated. Mirrors the get()/recordPath() traversal guard.
     try {
       // Write to a temp file then atomically rename into place, so a concurrent
       // reader never sees a partial/empty record. Then drop the reservation lock.
@@ -276,6 +304,7 @@ export function all(): RunRecord[] {
 }
 
 export function get(id: string): RunRecord | undefined {
+  if (!isValidId(id)) return undefined; // untrusted id — never join() it (traversal guard)
   const cached = records.get(id);
   if (cached) return cached;
   if (dir) {

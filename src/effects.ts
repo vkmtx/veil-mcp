@@ -1,9 +1,10 @@
 /** Effects as data. File changes via git porcelain before/after diff. */
 
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { resolve, relative, join } from "node:path";
 import { resolveBin } from "./binpath.js";
+import { config } from "./config.js";
 
 /**
  * Canonical git top-level dir for cwd (`git rev-parse --show-toplevel`, realpath'd),
@@ -107,11 +108,19 @@ export function cloneDiff(origin: string, clone: string): string[] {
   const o = canon(origin);
   const c = canon(clone);
   let out = "";
+  // Explicit maxBuffer (the default is only 1 MB). A large previewed change would
+  // otherwise overflow the default and throw an ENOBUFS whose `status` is undefined —
+  // the old catch collapsed that to [] ("nothing changed"), silently hiding a real
+  // change. Cap at the stream budget (fallback 64 MB when unbounded) and, on overflow,
+  // report an explicit incompleteness marker rather than a false clean tree.
+  const cap = config.maxStreamBytes > 0 ? config.maxStreamBytes : 64 * 1024 * 1024;
   try {
-    out = execFileSync(resolveBin("diff"), ["-rq", "--exclude=.git", "--exclude=node_modules", o, c], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    out = execFileSync(resolveBin("diff"), ["-rq", "--exclude=.git", "--exclude=node_modules", o, c], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: cap });
   } catch (e) {
     // diff exits 1 when trees differ — that's the normal case, output is on stdout.
-    const err = e as { status?: number; stdout?: string };
+    const err = e as { status?: number; stdout?: string; code?: string; message?: string };
+    const overflow = err.code === "ENOBUFS" || (typeof err.message === "string" && /maxBuffer/i.test(err.message));
+    if (overflow) return ["preview_effects_incomplete: diff output exceeded the buffer cap — some changed paths not listed"];
     if (err.status === 1 && typeof err.stdout === "string") out = err.stdout;
     else return []; // exit 2 (real error) or no diff binary → nothing to report
   }
@@ -177,4 +186,60 @@ export function diffStatus(
     changed.push(t.startsWith("??") ? `deleted (untracked) ${porcelainPath(line)}` : `no longer dirty (committed or reverted): ${t}`);
   }
   return changed;
+}
+
+/**
+ * Content signature (size + nanosecond mtime) for every porcelain path in `status`.
+ * Used to catch a command that re-modifies an ALREADY-dirty (or still-untracked) file:
+ * its porcelain STATUS line is unchanged (" M f" before and after) so diffStatus sees
+ * no transition, yet the content changed. mtime+size is cheap (one stat per dirty path)
+ * and, with ns mtime, reliably flips on a rewrite; a same-size rewrite within the same
+ * mtime tick is the residual blind spot — documented, consistent with effects staying
+ * best-effort. A path that can't be stat'd records an "absent" sentinel so a
+ * disappearance/reappearance still registers as a change.
+ */
+export function dirtySignatures(cwd: string, status: Set<string> | null): Map<string, string> {
+  const sigs = new Map<string, string>();
+  if (!status) return sigs;
+  for (const line of status) {
+    const rel = porcelainPath(line);
+    if (!rel || sigs.has(rel)) continue;
+    try {
+      const s = statSync(resolve(cwd, rel), { bigint: true });
+      sigs.set(rel, `${s.size}:${s.mtimeNs}`);
+    } catch {
+      sigs.set(rel, "absent");
+    }
+  }
+  return sigs;
+}
+
+/**
+ * Paths present with the SAME porcelain status line on both sides (so diffStatus emitted
+ * nothing for them) whose content signature changed — i.e. an already-dirty/untracked
+ * file the command modified AGAIN. Returns `modified <path>` lines. Scoped to lines
+ * common to both snapshots so a file diffStatus already flagged via a status transition
+ * is never double-reported.
+ */
+export function reModified(
+  before: Set<string> | null,
+  after: Set<string> | null,
+  beforeSig: Map<string, string>,
+  afterSig: Map<string, string>,
+): string[] {
+  if (!before || !after) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const line of after) {
+    if (!before.has(line)) continue; // a transition — diffStatus already reports it
+    const rel = porcelainPath(line);
+    if (!rel || seen.has(rel)) continue;
+    const b = beforeSig.get(rel);
+    const a = afterSig.get(rel);
+    if (b !== undefined && a !== undefined && b !== a) {
+      seen.add(rel);
+      out.push(`modified ${rel}`);
+    }
+  }
+  return out;
 }

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { condense, lineCount } from "../src/render.js";
 import { extractSignals } from "../src/signals.js";
 import { diffStatus, effectsFromTrace, gitToplevel } from "../src/effects.js";
+import { get as storeGet, put as storePut } from "../src/store.js";
 import { withRepoLock } from "../src/repolock.js";
 import { sandboxAvailable, buildProfile, buildBwrapArgs, buildLandrunArgs, defaultSecretPaths, scrubSecretEnv } from "../src/policy.js";
 import { looksInteractive, classify } from "../src/classify.js";
@@ -65,12 +66,26 @@ check("condense width-caps a giant single line", capped.length < 5000 && capped.
 const transition = diffStatus(new Set([" M f"]), new Set(["M  f"]));
 check("git-add of dirty file not phantom-reverted", Array.isArray(transition) && transition.some((l) => l.includes("f")) && !transition.some((l) => l.includes("reverted")));
 
+// store (path-traversal guard): get() must reject any id that isn't a well-formed `cmdN`
+// BEFORE it reaches join() — get("../secret") used to read a JSON file OUTSIDE the store.
+storePut({ id: "cmd900001", command: "echo", cwd: "/tmp", at: Date.now(), exit: 0, durationMs: 1, timedOut: false, stdoutTruncated: false, stderrTruncated: false, stdoutBinary: false, stderrBinary: false, attempts: 1, stdout: "hi", stderr: "", filesChanged: null });
+check("store.get returns a valid record", storeGet("cmd900001")?.stdout === "hi");
+check("store.get rejects a traversal id", storeGet("../secret") === undefined && storeGet("../../etc/passwd") === undefined);
+check("store.get rejects malformed ids", storeGet("cmd007") === undefined && storeGet("cmd") === undefined && storeGet("") === undefined && storeGet("cmd1.json") === undefined);
+
 // policy (K): sandbox profile shape + availability.
 check("sandboxAvailable true on macOS", process.platform !== "darwin" || sandboxAvailable() === true);
 // K+ Linux backend (bubblewrap) — pure arg-builder, verifiable on any platform.
 const bw = buildBwrapArgs("echo hi", "/tmp/work", {});
 check("bwrap ro-binds root, binds + chdir cwd, runs via sh", bw.includes("--ro-bind / /") && bw.includes("--bind") && bw.includes("--chdir") && bw.includes("/bin/sh -c"));
 check("bwrap unshare-net only when network denied", buildBwrapArgs("x", "/tmp/w", { network: false }).includes("--unshare-net") && !buildBwrapArgs("x", "/tmp/w", {}).includes("--unshare-net"));
+// network:false must ALSO mask the runtime socket dirs — --unshare-net drops TCP/UDP but
+// AF_UNIX sockets (e.g. /run/docker.sock) on the bound FS stay reachable. The mask is
+// existence-guarded, so assert /run masking only where /run exists (Linux); default
+// (network allowed) never masks it.
+const bwNoNet = buildBwrapArgs("x", "/tmp/w", { network: false });
+if (existsSync("/run")) check("bwrap network:false masks /run socket dir", /--tmpfs\s+'?\/run'?/.test(bwNoNet));
+check("bwrap network:true does not mask /run", !buildBwrapArgs("x", "/tmp/w", {}).includes("/run"));
 
 // K++ Landlock backend (landrun) — namespace-free; pure arg-builder, verifiable anywhere.
 const lr = buildLandrunArgs("echo hi", "/tmp/work", {});
@@ -105,6 +120,13 @@ check("summarizeTrace records rename dest + openat-write as wrote", trDel.wrote.
 // honesty: a FAILED unlink (`= -1 ENOENT`) deleted nothing and must not be counted.
 const trFail = summarizeTrace('unlink("/tmp/missing.txt")               = -1 ENOENT (No such file or directory)');
 check("summarizeTrace ignores a failed unlink (= -1 ENOENT)", !trFail.deleted.includes("/tmp/missing.txt") && trFail.deleted.length === 0);
+// A FAILED open (= -1 EACCES) must NOT count as a write — the open branch now requires a
+// successful fd return, matching the delete/rename/mkdir `= 0` guards. A successful open
+// with the same write flags is still recorded.
+const trFailOpen = summarizeTrace('openat(AT_FDCWD, "/etc/passwd", O_WRONLY|O_CREAT, 0644) = -1 EACCES (Permission denied)');
+check("summarizeTrace ignores a failed open (= -1 EACCES)", !trFailOpen.wrote.includes("/etc/passwd") && trFailOpen.wrote.length === 0);
+const trOkOpen = summarizeTrace('openat(AT_FDCWD, "/tmp/ok.txt", O_WRONLY|O_CREAT, 0644) = 5');
+check("summarizeTrace still records a successful open write", trOkOpen.wrote.includes("/tmp/ok.txt"));
 // effects-from-trace: cwd-scoped writes become files_changed (replaces git when tracing).
 const fxTrace = effectsFromTrace(["/work/a.txt", "/work/sub/b.txt", "/etc/passwd", "/work/a.txt"], [], "/work");
 check("effectsFromTrace scopes to cwd, relativizes, dedupes", fxTrace.includes("wrote a.txt") && fxTrace.includes("wrote sub/b.txt") && !fxTrace.some((l) => l.includes("passwd")) && fxTrace.length === 2);
@@ -426,6 +448,13 @@ check("effect diff lists modified + new", Array.isArray(e.files_changed) && e.fi
 // OGL-102: the gitStatus-backed effects path still reports a non-empty changeset
 // after switching `git status` to execFileSync (maxBuffer raised, no shell hop).
 check("gitStatus-backed files_changed non-empty after execFileSync switch", Array.isArray(e.files_changed) && e.files_changed.length > 0);
+// re-modifying an ALREADY-dirty file (its porcelain status line unchanged) must still be
+// reported: the status-line diff alone misses it, content signatures catch it. Seed an
+// untracked file, then modify it again on the NEXT run — "?? dirty.txt" both sides.
+writeFileSync(join(repo, "dirty.txt"), "one\n");
+await client.callTool({ name: "sh_run", arguments: { command: "echo two >> dirty.txt", cwd: repo } });
+const reMod = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo three >> dirty.txt", cwd: repo } })));
+check("re-modified already-dirty file still reported", Array.isArray(reMod.files_changed) && reMod.files_changed.some((l: string) => l.includes("dirty.txt")));
 // deleting an untracked file reads as a deletion, not a "(reverted)" rollback. (bug found v0.2)
 writeFileSync(join(repo, "scratch.txt"), "tmp\n");
 const del = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "rm scratch.txt", cwd: repo } })));
@@ -985,6 +1014,25 @@ writeFileSync(join(nsB, "marker.txt"), "from-B\n");
 checkpoint("shared", nsA);
 checkpoint("shared", nsB); // same label, different dir — must not clobber A's snapshot
 check("namespacing: each dir lists its own checkpoint independently", list(nsA).includes("shared") && list(nsB).includes("shared"));
+
+// checkpoint privacy + atomicity: the per-project store must be OWNER-ONLY 0700 (snapshots
+// hold a copy of the working tree), and replacing an existing label must be atomic
+// (staging → rename), never leaving a partial tree or staging/old siblings at the store.
+if (process.platform !== "win32") {
+  const secDir = mkdtempSync(join(tmpdir(), "veil-ckpt-perm-"));
+  writeFileSync(join(secDir, "f.txt"), "v1\n");
+  const info1 = checkpoint("perm", secDir);
+  const storeDir = join(info1.path, ".."); // storeFor(secDir): the per-project store dir
+  check("checkpoint store dir is owner-only 0700", (statSync(storeDir).mode & 0o777) === 0o700);
+  writeFileSync(join(secDir, "f.txt"), "v2\n");
+  const info2 = checkpoint("perm", secDir); // overwrite same label
+  check(
+    "re-checkpoint replaces atomically (dest complete)",
+    existsSync(info2.path) && existsSync(join(info2.path, "f.txt")) && readFileSync(join(info2.path, "f.txt"), "utf8") === "v2\n",
+  );
+  check("no staging/old leftovers in the store", readdirSync(storeDir).every((f) => !f.includes(".staging.") && !f.includes(".old.")));
+  rmSync(secDir, { recursive: true, force: true });
+}
 // mutate both, then restore each from its own snapshot.
 writeFileSync(join(nsA, "marker.txt"), "MUTATED-A\n");
 writeFileSync(join(nsB, "marker.txt"), "MUTATED-B\n");
@@ -1158,6 +1206,16 @@ const bgStart = Date.now();
 const bgRun = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "sleep 5", background: true } })));
 check("background run returns id+pid+status running+background flag", typeof bgRun.id === "string" && typeof bgRun.pid === "number" && bgRun.status === "running" && bgRun.background === true);
 check("background run returns immediately (does not block on the command)", Date.now() - bgStart < 2000);
+
+// 1b) background:true with an INVALID cwd must NOT crash the server. The async spawn
+// 'error' (ENOENT on the bad cwd) previously hit an unhandled 'error' event because the
+// listener was wired only AFTER an early return; now it's absorbed. The call returns an
+// error, and the server stays alive for the next request.
+const bgBad = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "echo hi", cwd: "/no/such/dir/veil-xyz", background: true } })));
+check("background invalid cwd returns an error (no crash)", typeof bgBad.error === "string");
+await sleepMs(150); // let any async spawn 'error' fire — a crash would kill the transport
+const bgAlive = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "echo survived" } })));
+check("server survives a failed background spawn", bgAlive.exit === 0 && bgAlive.ok === true);
 
 // 2) sh_logs surfaces emitted lines + a cursor; a second poll with that cursor returns
 // ONLY new output (the cursor advances). The command emits three lines spaced out, then

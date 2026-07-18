@@ -335,9 +335,23 @@ export function buildBwrapArgs(command: string, cwd: string, opts: SandboxOpts =
   const mask = safeDenyReads(opts)
     .map((p) => `--tmpfs ${shQuote(p)}`)
     .join(" ");
+  // --unshare-net drops TCP/UDP, but AF_UNIX sockets on the bound filesystem (e.g.
+  // /run/docker.sock, a Podman socket) stay reachable — a "no network" command could
+  // still drive the host Docker/Podman daemon and escape the write-confine. Overlay the
+  // runtime socket dirs with empty tmpfs when network is denied, so those sockets are
+  // gone too. Existence-guarded: a minimal image without /run or /var/run just skips it
+  // (bwrap errors on a missing --tmpfs target). /var/run is usually a symlink to /run;
+  // masking both is harmless.
+  const netMask =
+    opts.network === false
+      ? ["/run", "/var/run"]
+          .filter((p) => existsSync(p))
+          .map((p) => `--tmpfs ${shQuote(p)}`)
+          .join(" ")
+      : "";
   // --unshare-pid is required for `--proc /proc` to mount (else bwrap exits nonzero).
   return (
-    `${resolveBin("bwrap")} --unshare-pid --ro-bind / / --dev /dev --proc /proc ${binds}${mask ? " " + mask : ""} --chdir ${shQuote(canonical(cwd))} ` +
+    `${resolveBin("bwrap")} --unshare-pid --ro-bind / / --dev /dev --proc /proc ${binds}${mask ? " " + mask : ""}${netMask ? " " + netMask : ""} --chdir ${shQuote(canonical(cwd))} ` +
     `${net}--die-with-parent /bin/sh -c ${shQuote(command)}`
   );
 }

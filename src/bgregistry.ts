@@ -21,7 +21,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { config } from "./config.js";
 import { BoundedBuffer, escalatingKill } from "./exec.js";
-import { nextId, put } from "./store.js";
+import { nextId, put, releaseId } from "./store.js";
 import type { RunRecord } from "./types.js";
 
 export type BgStatus = "running" | "exited" | "killed";
@@ -145,34 +145,15 @@ export function startBackground(opts: {
     }
   };
 
-  if (child.pid === undefined) {
-    // spawn never produced a pid (e.g. the shell binary is missing). Nothing to track.
-    return { error: "failed to spawn background process (no pid)" };
-  }
-
-  const handle: BgHandle = {
-    id,
-    command: opts.command,
-    cwd: opts.cwd,
-    pid: child.pid,
-    child,
-    out,
-    err,
-    startedAt: process.hrtime.bigint(),
-    at: Date.now(),
-    status: "running",
-    persist: opts.persist,
-    killTree,
-  };
-  // Insert BEFORE wiring the close/error listeners: they call reap(), which is a no-op
-  // unless the handle is registered, and getLogs/kill/the shutdown reaper all resolve
-  // through this Map. Without it the process is spawned but untracked — orphaned on exit.
-  registry.set(id, handle);
+  // The handle exists only once we know the spawn produced a pid; until then it stays
+  // undefined and the listeners below no-op through reap()'s guard.
+  let handle: BgHandle | undefined;
 
   /** Flush the handle to the durable store, then drop it from the live registry.
-   *  put() FIRST so the id never has a window where it resolves to neither. */
+   *  put() FIRST so the id never has a window where it resolves to neither. No-op until
+   *  the handle is registered (a pre-registration error/close just lands in the buffers). */
   const reap = (exit: number) => {
-    if (!registry.has(id)) return; // already reaped (error after close, double event)
+    if (!handle || !registry.has(id)) return; // not yet registered, or already reaped
     if (handle.cancelKill) handle.cancelKill();
     const durationMs = Number(process.hrtime.bigint() - handle.startedAt) / 1e6;
     const oBin = out.isBinary;
@@ -200,14 +181,21 @@ export function startBackground(opts: {
     registry.delete(id);
   };
 
+  // Wire error/close listeners IMMEDIATELY after spawn — BEFORE the no-pid early-return.
+  // An async spawn failure (a non-existent cwd, a missing shell binary) emits 'error' on
+  // the next tick, and an 'error' event with NO listener crashes the whole MCP server.
+  // Node emits these events asynchronously, so this synchronous setup (incl. registry.set
+  // below) always completes first — no pre-registration race.
   child.on("close", (code, signal) => {
-    if (signal) {
-      handle.signal = signal;
-      // A signalled close that wasn't an explicit sh_kill is still a kill, not a clean
-      // exit — mark it so unless we already recorded the kill.
-      if (handle.status === "running") handle.status = "killed";
-    } else if (handle.status === "running") {
-      handle.status = "exited";
+    if (handle) {
+      if (signal) {
+        handle.signal = signal;
+        // A signalled close that wasn't an explicit sh_kill is still a kill, not a clean
+        // exit — mark it so unless we already recorded the kill.
+        if (handle.status === "running") handle.status = "killed";
+      } else if (handle.status === "running") {
+        handle.status = "exited";
+      }
     }
     // Convention shared with runCommand: a signalled death has no numeric code.
     reap(signal ? 137 : code ?? -1);
@@ -215,9 +203,35 @@ export function startBackground(opts: {
 
   child.on("error", (e) => {
     err.push(Buffer.from(String(e)));
-    if (handle.status === "running") handle.status = "exited";
+    if (handle && handle.status === "running") handle.status = "exited";
     reap(-1);
   });
+
+  if (child.pid === undefined) {
+    // spawn produced no pid (missing shell binary, invalid cwd, …). The 'error' listener
+    // above safely absorbs the async failure instead of crashing the server; release the
+    // reserved id so the slot isn't leaked. Nothing else to track.
+    releaseId(id);
+    return { error: "failed to spawn background process (no pid)" };
+  }
+
+  handle = {
+    id,
+    command: opts.command,
+    cwd: opts.cwd,
+    pid: child.pid,
+    child,
+    out,
+    err,
+    startedAt: process.hrtime.bigint(),
+    at: Date.now(),
+    status: "running",
+    persist: opts.persist,
+    killTree,
+  };
+  // getLogs/kill/the shutdown reaper all resolve through this Map; without it the process
+  // is spawned but untracked — orphaned on exit.
+  registry.set(id, handle);
 
   return { id, pid: child.pid, status: "running" };
 }

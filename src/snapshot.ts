@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, readdirSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, readdirSync, writeFileSync, readFileSync, statSync, renameSync, chmodSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -40,6 +40,19 @@ function storeFor(dir: string): string {
   return join(STORE_ROOT, `proj-${projHash(dir)}`);
 }
 
+/**
+ * Ensure `root` exists (shared parent — default perms, since tmpdir() is `/tmp` and
+ * multi-user on Linux) then create/clamp the per-project `leaf` to owner-only 0700.
+ * Snapshots hold a copy of the working tree (possibly source with secrets), so — like
+ * the record store (store.ts) — they must be unreadable by other local users. Only the
+ * leaf is clamped so a shared `/tmp/veil-checkpoints` root stays usable by other users.
+ */
+function secureLeaf(root: string, leaf: string): void {
+  mkdirSync(root, { recursive: true });
+  mkdirSync(leaf, { recursive: true, mode: 0o700 });
+  try { chmodSync(leaf, 0o700); } catch { /* not owner / unsupported FS — best-effort */ }
+}
+
 /** Per-project sidecar (META) store for `dir`. */
 function metaFor(dir: string): string {
   return join(META_ROOT, `proj-${projHash(dir)}`);
@@ -60,6 +73,12 @@ function safeLabel(label: string): string {
   // them explicitly; multi-dot names like "..." are harmless literal dirs.
   if (label === "." || label === "..") {
     throw new Error(`invalid checkpoint label: ${JSON.stringify(label)} (reserved path segment)`);
+  }
+  // Reserve the internal staging/old-swap suffixes (`<label>.staging.<pid>` /
+  // `<label>.old.<pid>`) so a user label can never collide with — or be mistaken for —
+  // one of checkpoint()'s transient siblings, which list() hides by the same pattern.
+  if (/\.(staging|old)\.\d+$/.test(label)) {
+    throw new Error(`invalid checkpoint label: ${JSON.stringify(label)} (reserved suffix)`);
   }
   return label;
 }
@@ -143,23 +162,50 @@ export function checkpoint(label: string, dir: string): CheckpointInfo {
   const store = storeFor(dir);
   const dest = containedPath(store, label);
   if (!existsSync(dir)) throw new Error(`dir does not exist: ${dir}`);
-  mkdirSync(store, { recursive: true });
-  rmSync(dest, { recursive: true, force: true }); // fresh snapshot each time
+  secureLeaf(STORE_ROOT, store);
+
+  // Build the new snapshot in a STAGING sibling, then swap it over `dest` with atomic
+  // renames — so `dest` is only ever a COMPLETE old-or-new tree, never a half-written one
+  // that a later `restore --delete` could apply. (Previously `dest` was rm'd first and
+  // copied into in place, so a crash mid-copy left a partial snapshot at the live path.)
+  // staging/old are derived from the already-contained `dest`, so they sit inside `store`
+  // and are hidden from list() by their reserved suffix (safeLabel bars a user collision).
+  const staging = `${dest}.staging.${process.pid}`;
+  const old = `${dest}.old.${process.pid}`;
+  rmSync(staging, { recursive: true, force: true });
+  rmSync(old, { recursive: true, force: true });
 
   let method: "clone" | "rsync";
-  // Only attempt a CoW clone when the source shares the store's volume; otherwise cp -cR
-  // would full-copy yet still report "clone". tryClone itself also returns false if
-  // the clonefile fails (e.g. an older HFS+ volume), falling back to the rsync mirror.
-  if (chooseMethod(process.platform, devOf(dir), devOf(store)) === "clone" && tryClone(dir, dest)) {
-    method = "clone";
-  } else {
-    mkdirSync(dest, { recursive: true });
-    // Trailing slash on source copies contents, not the dir itself.
-    execFileSync(resolveBin("rsync"), ["-a", "--delete", ...EXCLUDES, `${dir}/`, `${dest}/`], { stdio: "ignore" });
-    method = "rsync";
+  // Build into staging. On ANY failure (rsync mid-copy, disk full, a file vanishing), drop
+  // the PARTIAL staging and leave the existing `dest` untouched — a leftover `.staging.`
+  // sibling would otherwise be a phantom, sidecar-less (thus restorable) checkpoint over an
+  // incomplete tree. Only attempt a CoW clone when the source shares the store's volume;
+  // otherwise cp -cR would full-copy yet still report "clone". tryClone returns false if the
+  // clonefile fails (e.g. an older HFS+ volume), falling back to the rsync mirror.
+  try {
+    if (chooseMethod(process.platform, devOf(dir), devOf(store)) === "clone" && tryClone(dir, staging)) {
+      method = "clone";
+    } else {
+      mkdirSync(staging, { recursive: true, mode: 0o700 });
+      // Trailing slash on source copies contents, not the dir itself.
+      execFileSync(resolveBin("rsync"), ["-a", "--delete", ...EXCLUDES, `${dir}/`, `${staging}/`], { stdio: "ignore" });
+      method = "rsync";
+    }
+  } catch (e) {
+    rmSync(staging, { recursive: true, force: true });
+    throw e;
   }
 
-  mkdirSync(metaFor(dir), { recursive: true });
+  // Atomic publish: the new tree is complete in `staging`. Move the old `dest` aside, then
+  // rename staging → dest (both same-volume, so each rename is atomic). Only after the new
+  // tree is in place is the old one removed. A crash between the two renames leaves `dest`
+  // momentarily absent (restore reports "no checkpoint") — never a partial tree; any
+  // `.old.`/`.staging.` orphan a hard crash leaves is hidden from list().
+  if (existsSync(dest)) renameSync(dest, old);
+  renameSync(staging, dest);
+  rmSync(old, { recursive: true, force: true });
+
+  secureLeaf(META_ROOT, metaFor(dir));
   writeFileSync(dirSidecar(label, dir), resolve(dir)); // remember WHERE, to guard restore
   return { label, dir, path: dest, method };
 }
@@ -243,7 +289,10 @@ export function dropPreview(clonePath: string): void {
 export function list(dir: string = process.cwd()): string[] {
   const store = storeFor(dir);
   if (!existsSync(store)) return [];
-  return readdirSync(store);
+  // Hide checkpoint()'s transient staging/old-swap siblings (`<label>.staging.<pid>` /
+  // `<label>.old.<pid>`) — an interrupted build/crash could leave one, and it must never
+  // surface as a restorable checkpoint over a partial tree. safeLabel bars user collision.
+  return readdirSync(store).filter((f) => !/\.(staging|old)\.\d+$/.test(f));
 }
 
 /** Delete a checkpoint and its sidecar, scoped to the project at `dir` (defaults to cwd). */
