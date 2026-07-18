@@ -3,6 +3,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { get } from "../store.js";
+import { compileSafe } from "../saferegex.js";
 
 export function registerShDetail(server: McpServer): void {
   server.registerTool(
@@ -43,11 +44,11 @@ export function registerShDetail(server: McpServer): void {
         if (isBinary) {
           return { content: [{ type: "text", text: JSON.stringify({ error: "match not supported on a binary stream" }) }], isError: true };
         }
-        let re: RegExp;
-        try {
-          re = new RegExp(match);
-        } catch (e) {
-          return { content: [{ type: "text", text: JSON.stringify({ error: `invalid regex: ${String(e instanceof Error ? e.message : e)}` }) }], isError: true };
+        // compileSafe refuses catastrophic-backtracking patterns (and invalid syntax)
+        // instead of running them per-line on the single-threaded event loop.
+        const { re, error } = compileSafe(match);
+        if (!re) {
+          return { content: [{ type: "text", text: JSON.stringify({ error }) }], isError: true };
         }
         const truncated = selector === "stdout" ? rec.stdoutTruncated : rec.stderrTruncated;
         const lines = (selector === "stdout" ? rec.stdout : rec.stderr).split("\n");

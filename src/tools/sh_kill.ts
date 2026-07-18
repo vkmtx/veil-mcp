@@ -13,8 +13,10 @@ export function registerShKill(server: McpServer): void {
       description:
         "Stop a background run started with sh_run background:true, by id. Signals the whole " +
         "process group (so a dev server's children die too). SIGTERM (the default) escalates to " +
-        "SIGKILL after 2s if the process ignores it. Killing an id whose process has ALREADY " +
-        "exited is not an error — it returns already_exited (idempotent).",
+        "SIGKILL after 2s if the process ignores it. Returns status:\"terminating\" — the signal " +
+        "was sent but the OS hasn't confirmed the process is dead yet; poll sh_logs to see it " +
+        "settle to exited/killed. Killing an id whose process has ALREADY exited is not an error " +
+        "— it returns already_exited (idempotent).",
       inputSchema: {
         id: z.string().describe("The background run id returned by sh_run (e.g. cmd7)."),
         signal: z
@@ -25,9 +27,10 @@ export function registerShKill(server: McpServer): void {
     },
     async ({ id, signal }) => {
       const res = kill(id, signal);
-      if (res.status === "killed") {
+      if (res.status === "terminating") {
+        // The signal was sent; the process is being torn down but not confirmed dead yet.
         return {
-          content: [{ type: "text", text: JSON.stringify({ id, status: "killed", signal, ok: true }) }],
+          content: [{ type: "text", text: JSON.stringify({ id, status: "terminating", signal, ok: true }) }],
         };
       }
       // Not live. If a record exists, the process already exited — idempotent success,

@@ -1,0 +1,11 @@
+{
+  "//": "Typecheck everything — src AND test/ + bench/ — with no emit. The base tsconfig.json",
+  "//2": "restricts to src for the dist build; this widens the net so the gate catches type",
+  "//3": "errors in tests and benchmarks too (they run under tsx, which never typechecks).",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "bench/**/*.ts"]
+}

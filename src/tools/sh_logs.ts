@@ -6,6 +6,28 @@ import { getLogs } from "../bgregistry.js";
 import { get } from "../store.js";
 import { condense } from "../render.js";
 
+/**
+ * Slice a durable record's stream from a byte cursor, honoring the ever-byte total so a
+ * poll AFTER the live→durable handoff returns only NEW output — not a duplicate dump of
+ * what was already tailed live. `ever` absent (a foreground record, or one written before
+ * the field existed) → treat the stored string as the whole stream.
+ */
+function durableSlice(
+  stored: string,
+  binary: boolean,
+  ever: number | undefined,
+  cursor: number | undefined,
+): { text: string; cursor: number; gap: boolean } {
+  const raw = Buffer.from(stored, binary ? "base64" : "utf8");
+  const everBytes = ever ?? raw.length;
+  const retainedStart = everBytes - raw.length; // ever-offset where the stored tail begins
+  const from = cursor ?? 0;
+  const gap = from < retainedStart;
+  const skip = Math.max(0, from - retainedStart);
+  const slice = skip >= raw.length ? Buffer.alloc(0) : raw.subarray(skip);
+  return { text: binary ? slice.toString("base64") : slice.toString("utf8"), cursor: everBytes, gap };
+}
+
 export function registerShLogs(server: McpServer): void {
   server.registerTool(
     "sh_logs",
@@ -75,26 +97,30 @@ export function registerShLogs(server: McpServer): void {
           isError: true,
         };
       }
+      const wantOut = stream === "stdout" || stream === "both";
+      const wantErr = stream === "stderr" || stream === "both";
+      // Honor the caller's cursor so a poll after the live→durable handoff returns only
+      // NEW output (the old code re-dumped rec.stdout/stderr in full, duplicating what was
+      // already tailed live).
+      const so = durableSlice(rec.stdout, !!rec.stdoutBinary, rec.stdoutBytesEver, stdout_cursor);
+      const se = durableSlice(rec.stderr, !!rec.stderrBinary, rec.stderrBytesEver, stderr_cursor);
       const result: Record<string, unknown> = {
         id,
         status: rec.killed ? "killed" : "exited",
         exit: rec.exit,
         running_ms: Math.round(rec.durationMs),
-        // The record is the FULL final stream; each cursor is that stream's byte length
-        // so a follow-up poll (against the record) returns nothing new.
-        stdout_cursor: Buffer.byteLength(rec.stdout, rec.stdoutBinary ? "base64" : "utf8"),
-        stderr_cursor: Buffer.byteLength(rec.stderr, rec.stderrBinary ? "base64" : "utf8"),
+        stdout_cursor: so.cursor,
+        stderr_cursor: se.cursor,
       };
       if (rec.signal) result.signal = rec.signal;
       if (rec.stdoutTruncated) result.stdout_truncated = true;
       if (rec.stderrTruncated) result.stderr_truncated = true;
-      const wantOut = stream === "stdout" || stream === "both";
-      const wantErr = stream === "stderr" || stream === "both";
-      if (wantOut && rec.stdout && !rec.stdoutBinary) {
-        result.stdout = full ? rec.stdout : condense(rec.stdout, id, "stdout", { truncated: rec.stdoutTruncated });
+      if ((wantOut && so.gap) || (wantErr && se.gap)) result.gap = true;
+      if (wantOut && so.text && !rec.stdoutBinary) {
+        result.stdout = full ? so.text : condense(so.text, id, "stdout", { truncated: rec.stdoutTruncated });
       }
-      if (wantErr && rec.stderr && !rec.stderrBinary) {
-        result.stderr = full ? rec.stderr : condense(rec.stderr, id, "stderr", { truncated: rec.stderrTruncated });
+      if (wantErr && se.text && !rec.stderrBinary) {
+        result.stderr = full ? se.text : condense(se.text, id, "stderr", { truncated: rec.stderrTruncated });
       }
       if (wantOut && rec.stdoutBinary) result.stdout_binary = true;
       if (wantErr && rec.stderrBinary) result.stderr_binary = true;

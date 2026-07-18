@@ -45,6 +45,13 @@ export interface RunRecord {
   attempts: number;
   stdout: string;
   stderr: string;
+  /** total bytes EVER emitted on each stream (incl. bytes dropped at the byte cap), set
+   *  for background runs so sh_logs can map a live byte cursor onto the durable record and
+   *  return only NEW output after the handoff. Optional: absent on foreground records and
+   *  on records written before this field existed (sh_logs then treats the stored stream
+   *  as the whole thing). */
+  stdoutBytesEver?: number;
+  stderrBytesEver?: number;
   /** git porcelain diff lines, or null when cwd is not a git repo. */
   filesChanged: string[] | null;
   /** full syscall trace text (structured syscall trace), when tracing was requested and captured. */

@@ -15,11 +15,12 @@ import { get as storeGet, put as storePut } from "../src/store.js";
 import { withRepoLock } from "../src/repolock.js";
 import { sandboxAvailable, buildProfile, buildBwrapArgs, buildLandrunArgs, defaultSecretPaths, scrubSecretEnv } from "../src/policy.js";
 import { looksInteractive, classify } from "../src/classify.js";
+import { compileSafe } from "../src/saferegex.js";
 import { traceAvailable, buildTraceCommand, summarizeTrace } from "../src/trace.js";
 import { runInit } from "../src/init.js";
 import { chooseMethod, checkpoint, restore, list } from "../src/snapshot.js";
 import { CLASSIFY_CORPUS } from "./classify-corpus.js";
-import { runCommand } from "../src/exec.js";
+import { runCommand, BoundedBuffer } from "../src/exec.js";
 import { shQuote } from "../src/shquote.js";
 import { resolveBin } from "../src/binpath.js";
 import { TURNS, recallCorpus, recallSurfaced } from "../bench/metrics-data.js";
@@ -72,6 +73,12 @@ storePut({ id: "cmd900001", command: "echo", cwd: "/tmp", at: Date.now(), exit: 
 check("store.get returns a valid record", storeGet("cmd900001")?.stdout === "hi");
 check("store.get rejects a traversal id", storeGet("../secret") === undefined && storeGet("../../etc/passwd") === undefined);
 check("store.get rejects malformed ids", storeGet("cmd007") === undefined && storeGet("cmd") === undefined && storeGet("") === undefined && storeGet("cmd1.json") === undefined);
+
+// BoundedBuffer: a SINGLE pushed chunk larger than the cap must still be trimmed to the
+// cap (the front-drop loop stops at one chunk, so the lone oversized chunk needs slicing).
+const bbCap = new BoundedBuffer(10);
+bbCap.push(Buffer.from("y".repeat(25)));
+check("BoundedBuffer caps a single oversized chunk", bbCap.retainedBytes === 10 && bbCap.toString().length === 10 && bbCap.truncated);
 
 // policy (K): sandbox profile shape + availability.
 check("sandboxAvailable true on macOS", process.platform !== "darwin" || sandboxAvailable() === true);
@@ -192,6 +199,29 @@ check("classify quoted git reset --hard destructive", classify('git "reset" --ha
 check("classify quoted git clean -fd destructive", classify("git 'clean' -fd").category === "destructive");
 check("classify quoted git push --force destructive", classify('git "push" --force').category === "destructive");
 
+// git write subcommands must NOT read as read-only (they mutate refs/config).
+check("classify git config set is mutating", classify("git config user.email me@x").category === "mutating");
+check("classify git config get is read-only", classify("git config --get user.email").category === "read-only");
+check("classify git config list is read-only", classify("git config --list").category === "read-only");
+check("classify git branch create is mutating", classify("git branch feature/x").category === "mutating");
+check("classify git branch list is read-only", classify("git branch -a").category === "read-only");
+check("classify git branch --contains is read-only", classify("git branch --contains HEAD").category === "read-only");
+check("classify git tag create is mutating", classify("git tag v1.2.3").category === "mutating");
+check("classify git tag list is read-only", classify("git tag -l").category === "read-only");
+check("classify git reflog expire is destructive", classify("git reflog expire --all").category === "destructive");
+check("classify git reflog show is read-only", classify("git reflog").category === "read-only");
+// a raw newline is a command separator: a multi-line script classifies by its worst line.
+check("classify treats newline as a separator", classify("echo ok\ngit push --force").category === "destructive");
+check("classify newline does not hide a destructive later line", classify("cd x\nrm -rf dist").category === "destructive");
+
+// saferegex: refuse catastrophic-backtracking patterns instead of hanging the event loop.
+check("compileSafe accepts a normal pattern", compileSafe("error: \\d+").re instanceof RegExp);
+check("compileSafe rejects a nested-quantifier pattern", compileSafe("(a+)+$").re === undefined && typeof compileSafe("(a+)+$").error === "string");
+check("compileSafe rejects (a*)* form", compileSafe("(a*)*").re === undefined);
+check("compileSafe allows a benign group + trailing quantifier", compileSafe("(foo)bar+").re instanceof RegExp);
+check("compileSafe rejects an over-long pattern", compileSafe("a".repeat(2000)).error !== undefined);
+check("compileSafe reports invalid syntax", compileSafe("(unclosed").error !== undefined);
+
 // ── veil-guard hook: bypass anchoring + danger coverage ─────────────────────────
 const guardPath = new URL("../hooks/veil-guard.sh", import.meta.url).pathname;
 function guardExitRaw(payload: string): number {
@@ -247,6 +277,18 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   check("guard: allows single-file rm -f build.log", guardExit("rm -f build.log") === 0);
   check("guard: blocks rm -R dir", guardExit("rm -R dir") === 2);
   check("guard: blocks force+glob rm -f *.log", guardExit("rm -f *.log") === 2);
+  // rm is anchored to EXECUTABLE position: rm as an argument or inside a quote is benign
+  // text and must NOT block; but rm after a runner (sudo) or at start/after an operator does.
+  check("guard: allows echo of an rm -rf string", guardExit("echo rm -rf /tmp/x") === 0);
+  check("guard: allows grep of an rm -rf string", guardExit('grep "rm -rf" README.md') === 0);
+  check("guard: allows a filename containing rm", guardExit("cat charm-rf.log") === 0);
+  check("guard: blocks rm -rf at command start", guardExit("rm -rf /tmp/x") === 2);
+  check("guard: blocks rm -rf after && operator", guardExit("cd /tmp && rm -rf x") === 2);
+  check("guard: blocks sudo rm -rf", guardExit("sudo rm -rf /tmp/x") === 2);
+  check("guard: blocks timeout rm -rf (wrapper)", guardExit("timeout 5 rm -rf /tmp/x") === 2);
+  check("guard: blocks nohup rm -rf (wrapper)", guardExit("nohup rm -rf /tmp/x") === 2);
+  check("guard: blocks rm -rf in a for/do loop", guardExit('for f in *; do rm -rf "$f"; done') === 2);
+  check("guard: blocks rm -rf in a brace group", guardExit("{ rm -rf /tmp/x; }") === 2);
   // One nag per session: same session_id → first verbose call blocks (steer to
   // sh_run), second is allowed; DANGEROUS still blocks in that same session.
   const oneshotSid = `${guardSidPrefix}-oneshot-${Date.now()}`;
@@ -556,6 +598,8 @@ const sm = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { 
 check("stdout_matches valid passes", sm.assert_ok === true);
 const smBad = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo hi", expect: { stdout_matches: "(" } } })));
 check("stdout_matches invalid regex fails with detail", smBad.assert_ok === false && smBad.assertions_failed.some((a: string) => a.includes("invalid regex")));
+const smRedos = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo aaaaaaaaaaaaaaaaaaaa", expect: { stdout_matches: "(a+)+$" } } })));
+check("stdout_matches refuses a catastrophic regex (no hang)", smRedos.assert_ok === false && smRedos.assertions_failed.some((a: string) => a.includes("nested quantifier")));
 const seEmpty = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo x", expect: { stderr_empty: true } } })));
 check("stderr_empty true passes on clean stderr", seEmpty.assert_ok === true);
 const seFail = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "echo e 1>&2", expect: { stderr_empty: true } } })));
@@ -636,7 +680,7 @@ check("read-only run omits files_changed", !("files_changed" in roLs));
 const roChg = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "ls", cwd: process.cwd(), expect: { changed: false } } })));
 check("read-only + changed assert still forces effect-diff", roChg.assert_ok === true);
 // Fresh server so the rm is the FIRST destructive-unconfined call (the nudge is once-per-process).
-const advT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env } });
+const advT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env } as Record<string, string> });
 const advC = new Client({ name: "smoke-adv", version: "0.0.0" });
 await advC.connect(advT);
 const advDir = mkdtempSync(join(tmpdir(), "veil-adv-"));
@@ -683,6 +727,8 @@ const grep = text(await client.callTool({ name: "sh_detail", arguments: { id: bi
 check("sh_detail match returns only the matching line", grep.includes("NEEDLE_42") && grep.includes("1 line(s)"));
 const grepNum = text(await client.callTool({ name: "sh_detail", arguments: { id: big.id, selector: "stdout", match: "^150$" } }));
 check("sh_detail match finds mid-stream value with line number", grepNum.includes("L150: 150"));
+const grepRedos = JSON.parse(text(await client.callTool({ name: "sh_detail", arguments: { id: big.id, selector: "stdout", match: "(a+)+$" } })));
+check("sh_detail match refuses a catastrophic regex (no hang)", typeof grepRedos.error === "string" && grepRedos.error.includes("nested quantifier"));
 const grepBad = JSON.parse(text(await client.callTool({ name: "sh_detail", arguments: { id: big.id, selector: "stdout", match: "(" } })));
 check("sh_detail match invalid regex errors", typeof grepBad.error === "string" && grepBad.error.includes("invalid regex"));
 
@@ -1136,7 +1182,7 @@ const cxRepo = mkdtempSync(join(tmpdir(), "veil-concur-"));
 execSync("git init -q && git config user.email t@t.co && git config user.name t", { cwd: cxRepo, shell: "/bin/bash" });
 writeFileSync(join(cxRepo, "a.txt"), "base\n");
 execSync("git add -A && git commit -qm init", { cwd: cxRepo, shell: "/bin/bash" });
-const cxT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env } });
+const cxT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env } as Record<string, string> });
 const cxC = new Client({ name: "smoke-concur", version: "0.0.0" });
 await cxC.connect(cxT);
 // ONE client, both calls in flight at once — the sleeps guarantee the windows would
@@ -1248,10 +1294,10 @@ check("sh_logs cursor returns only new output (no repeat of seen lines)", second
 // 3) sh_kill (SIGTERM) stops a live process → ok; sh_logs/sh_detail then show it
 // exited/killed; a second sh_kill is idempotent (already_exited, not an error).
 const killed = JSON.parse(text(await bgC.callTool({ name: "sh_kill", arguments: { id: tailRun.id, signal: "SIGTERM" } })));
-check("sh_kill SIGTERM on a live run returns ok+killed", killed.ok === true && killed.status === "killed" && killed.signal === "SIGTERM");
-// sh_kill flips status to "killed" SYNCHRONOUSLY, but the durable record is only
-// written when the child actually closes (reap). So poll sh_detail (the store) until
-// the record lands, rather than racing on the live status flip.
+check("sh_kill SIGTERM on a live run returns ok+terminating", killed.ok === true && killed.status === "terminating" && killed.signal === "SIGTERM");
+// sh_kill sets status "terminating" (signal sent, not confirmed dead). The durable record
+// is only written when the child actually closes (reap). So poll sh_detail (the store)
+// until the record lands, rather than racing on the state transition.
 let killedDetail: any = null;
 for (let i = 0; i < 60; i++) {
   await sleepMs(100);
@@ -1263,6 +1309,19 @@ check("sh_logs shows the killed run as exited/killed", postKill && (postKill.sta
 check("sh_detail resolves the killed run from the durable store", killedDetail.id === tailRun.id && typeof killedDetail.exit === "number");
 const killAgain = JSON.parse(text(await bgC.callTool({ name: "sh_kill", arguments: { id: tailRun.id, signal: "SIGTERM" } })));
 check("second sh_kill is idempotent (already_exited, not an error)", killAgain.status === "already_exited" && !("error" in killAgain));
+
+// 3b) terminating state is honest: a child that TRAPS SIGTERM stays alive after sh_kill,
+// so the window is observable — sh_logs must report status "terminating" with NO premature
+// exit code (the old code flipped to "killed"/exit 137 before the process was actually
+// dead). SIGKILL (the 2s escalation, or our cleanup) then reaps it for real.
+const trapRun = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "trap '' TERM; while :; do sleep 1; done", background: true } })));
+await sleepMs(200); // let it reach the trap + loop
+const trapKill = JSON.parse(text(await bgC.callTool({ name: "sh_kill", arguments: { id: trapRun.id, signal: "SIGTERM" } })));
+check("sh_kill on a SIGTERM-trapping run reports terminating", trapKill.status === "terminating" && trapKill.ok === true);
+await sleepMs(200); // still well within the 2s SIGTERM→SIGKILL window; the trap keeps it alive
+const duringTerm = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: trapRun.id, stream: "stdout" } })));
+check("sh_logs shows terminating with no premature exit", duringTerm.status === "terminating" && duringTerm.exit === undefined);
+await bgC.callTool({ name: "sh_kill", arguments: { id: trapRun.id, signal: "SIGKILL" } }); // reap for real (bypasses the trap)
 
 // 4) Incompatible options are REFUSED (with background_incompatible) and never spawn.
 const incExpect = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "sleep 5", background: true, expect: { exit: 0 } } })));
@@ -1283,6 +1342,21 @@ for (let i = 0; i < 40; i++) {
 check("self-exiting background run becomes exited", quickDetail && quickDetail.status === "exited");
 const quickStdout = text(await bgC.callTool({ name: "sh_detail", arguments: { id: quickRun.id, selector: "stdout" } }));
 check("self-exiting background run addressable via sh_detail with captured output", quickStdout.includes("hi"));
+
+// durable cursor: after the live→durable handoff, re-polling sh_logs with the returned
+// cursor must return NO new output — the old durable path ignored the cursor and re-dumped
+// the whole stream, duplicating what was already tailed live.
+const durCursor = quickDetail.stdout_cursor;
+const rePoll = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: quickRun.id, stream: "stdout", stdout_cursor: durCursor } })));
+check("sh_logs durable re-poll with cursor returns no duplicate", (rePoll.stdout === undefined || rePoll.stdout === "") && rePoll.stdout_cursor === durCursor);
+const fromZero = JSON.parse(text(await bgC.callTool({ name: "sh_logs", arguments: { id: quickRun.id, stream: "stdout", stdout_cursor: 0, full: true } })));
+check("sh_logs durable from cursor 0 returns the full captured output", typeof fromZero.stdout === "string" && fromZero.stdout.includes("hi"));
+
+// child stdin is /dev/null: a command that reads stdin gets EOF immediately instead of
+// blocking to the timeout. `read` fails fast on EOF, then `echo done` still runs → exit 0.
+const stdinT = Date.now();
+const stdinRun = JSON.parse(text(await bgC.callTool({ name: "sh_run", arguments: { command: "read x; echo done", timeout_ms: 3000 } })));
+check("child gets EOF on stdin (no hang to timeout)", stdinRun.exit === 0 && stdinRun.timed_out !== true && Date.now() - stdinT < 2500);
 
 // 6) Shutdown reaping (the riskiest path): a background child must NOT outlive the
 // server. On a DEDICATED server, start a long sleep, capture its pid, then close the

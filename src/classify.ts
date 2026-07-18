@@ -203,13 +203,34 @@ function classifyGit(toks: string[]): Classification {
   }
   if (sub === "rebase" || sub === "filter-branch") return D("rewrites commit history");
   if (sub === "rm") return M("removes tracked files from the index/worktree");
+  if (sub === "config") {
+    // Reads: an explicit get/list form. Writes: an explicit mutate flag, OR a positional
+    // key+value (`git config user.email me@x`). A lone key (`git config user.email`) reads.
+    if (has(/\s(--get(-all|-regexp)?|--get-color(name)?|--list|-l)\b/)) return R();
+    if (has(/\s(--add|--unset(-all)?|--replace-all|--remove-section|--rename-section|--edit|-e)\b/)) return M("changes git config");
+    const ci = toks.indexOf("config");
+    const pos = ci >= 0 ? toks.slice(ci + 1).filter((t) => !t.startsWith("-")) : [];
+    return pos.length >= 2 ? M("sets a git config value") : R();
+  }
+  if (sub === "reflog") {
+    return has(/\breflog\s+(expire|delete)\b/) ? D("expires/deletes reflog entries irreversibly") : R();
+  }
   if (sub === "branch") {
     if (has(/\s-[a-zA-Z]*D\b/) || (has(/--delete\b/) && has(/\s(--force|-f)\b/))) return D("force-deletes a branch");
     if (has(/\s-d\b/) || has(/--delete\b/)) return M("deletes a (merged) branch");
-    return R();
+    if (has(/\s(-m|-M|--move|-c|-C|--copy)\b/)) return M("renames/copies a branch");
+    // Read-only listing/filter forms (some take a commit arg, so check flags before args).
+    if (has(/\s(--list|--contains|--no-contains|--merged|--no-merged|--points-at|--show-current|-a|-r|-v+|--all|--remotes|--format|--sort)\b/)) return R();
+    const bi = toks.indexOf("branch");
+    const pos = bi >= 0 ? toks.slice(bi + 1).filter((t) => !t.startsWith("-")) : [];
+    return pos.length >= 1 ? M("creates or updates a branch ref") : R();
   }
   if (sub === "tag") {
-    return has(/\s-d\b/) || has(/--delete\b/) ? M("deletes a tag") : R();
+    if (has(/\s-d\b/) || has(/--delete\b/)) return M("deletes a tag");
+    if (has(/\s(-l|--list|-n\d*|--contains|--no-contains|--points-at|--merged|--no-merged|--format|--sort)\b/)) return R();
+    const ti = toks.indexOf("tag");
+    const pos = ti >= 0 ? toks.slice(ti + 1).filter((t) => !t.startsWith("-")) : [];
+    return pos.length >= 1 ? M("creates a tag") : R();
   }
   if (sub === "remote") {
     return has(/\bremote\s+(add|remove|rm|set-url|rename|prune)\b/) ? M("changes remote config") : R();
@@ -329,6 +350,11 @@ function splitSegments(cmd: string): string[] | null {
     if (c === "|" && next === "|") { segs.push(cur); cur = ""; i++; continue; }
     if (c === "|") { segs.push(cur); cur = ""; continue; }
     if (c === ";") { segs.push(cur); cur = ""; continue; }
+    // A raw newline separates commands too (a multi-line script) — without this the whole
+    // script was one atom and only the first line's verb got classified. Inside quotes it
+    // is literal (handled above); a backslash-newline continuation stays in the atom (the
+    // `\\` branch consumes it). \r covers CRLF.
+    if (c === "\n" || c === "\r") { segs.push(cur); cur = ""; continue; }
     cur += c;
   }
   if (quote) return null; // unterminated quote — don't guess

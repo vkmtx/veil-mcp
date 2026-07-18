@@ -24,7 +24,9 @@ import { BoundedBuffer, escalatingKill } from "./exec.js";
 import { nextId, put, releaseId } from "./store.js";
 import type { RunRecord } from "./types.js";
 
-export type BgStatus = "running" | "exited" | "killed";
+// "terminating" = an sh_kill signal was sent but the child hasn't closed yet — so we
+// don't claim it's dead (or report an exit code) before the OS confirms it via 'close'.
+export type BgStatus = "running" | "terminating" | "exited" | "killed";
 
 interface BgHandle {
   id: string;
@@ -115,7 +117,9 @@ export function startBackground(opts: {
   const id = nextId();
   // detached:true → own process group, so killTree can signal the WHOLE tree (the
   // shell plus any grandchildren a dev server forks), exactly like runCommand.
-  const child = spawn(opts.toRun, { cwd: opts.cwd, shell: true, env: opts.env, detached: true });
+  // stdin is /dev/null ("ignore"): the contract is "no stdin", and an open/inherited
+  // stdin makes a child that reads it block instead of getting EOF. stdout/stderr piped.
+  const child = spawn(opts.toRun, { cwd: opts.cwd, shell: true, env: opts.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 
   const out = new BoundedBuffer(config.maxStreamBytes);
   const err = new BoundedBuffer(config.maxStreamBytes);
@@ -173,6 +177,11 @@ export function startBackground(opts: {
       attempts: 1,
       stdout: oBin ? out.toBase64() : out.toString(),
       stderr: eBin ? err.toBase64() : err.toString(),
+      // Total bytes ever emitted (incl. any dropped at the cap), so sh_logs can map a
+      // live-phase byte cursor onto the durable record and return only NEW output after
+      // the handoff instead of re-dumping the whole stream.
+      stdoutBytesEver: out.totalBytesEver,
+      stderrBytesEver: err.totalBytesEver,
       filesChanged: null,
       ...(handle.status === "killed" ? { killed: true } : {}),
       ...(handle.signal ? { signal: handle.signal } : {}),
@@ -190,9 +199,9 @@ export function startBackground(opts: {
     if (handle) {
       if (signal) {
         handle.signal = signal;
-        // A signalled close that wasn't an explicit sh_kill is still a kill, not a clean
-        // exit — mark it so unless we already recorded the kill.
-        if (handle.status === "running") handle.status = "killed";
+        // A signalled close is a kill (an explicit sh_kill left status "terminating"; an
+        // unsolicited signal caught the run "running"). Either way it settles as "killed".
+        if (handle.status === "running" || handle.status === "terminating") handle.status = "killed";
       } else if (handle.status === "running") {
         handle.status = "exited";
       }
@@ -236,11 +245,31 @@ export function startBackground(opts: {
   return { id, pid: child.pid, status: "running" };
 }
 
+/** Byte length of `buf` excluding a trailing INCOMPLETE UTF-8 sequence, so slicing at the
+ *  result never splits a multibyte codepoint across two polls. Scans back up to 3 bytes to
+ *  the last sequence's lead byte and checks whether all its continuation bytes are present.
+ */
+function lastCompleteUtf8(buf: Buffer): number {
+  const n = buf.length;
+  for (let back = 1; back <= 3 && back <= n; back++) {
+    const b = buf[n - back];
+    if ((b & 0xc0) === 0x80) continue; // continuation byte — keep scanning back for the lead
+    let expected: number;
+    if ((b & 0x80) === 0) expected = 1; // 0xxxxxxx ASCII
+    else if ((b & 0xe0) === 0xc0) expected = 2; // 110xxxxx
+    else if ((b & 0xf0) === 0xe0) expected = 3; // 1110xxxx
+    else if ((b & 0xf8) === 0xf0) expected = 4; // 11110xxx
+    else expected = 1; // invalid lead — treat as a lone byte
+    return back >= expected ? n : n - back; // complete → keep all; incomplete → hold back
+  }
+  return n; // all-continuation tail (or empty) — nothing safely holdable; emit as-is
+}
+
 /**
  * Logs for a live (or just-exited-but-still-live) handle since `cursor` bytes. Returns
  * null when the id is not live, so the caller falls back to the durable record via
- * store.get(id). The returned cursor is the stream's totalBytesEver — pass it back on
- * the next poll to get only new output.
+ * store.get(id). The returned cursor is the stream's totalBytesEver, minus any incomplete
+ * trailing UTF-8 held back — pass it back on the next poll to get only new output.
  */
 export function getLogs(
   id: string,
@@ -265,37 +294,41 @@ export function getLogs(
     stdout_truncated: h.out.truncated,
     stderr_truncated: h.err.truncated,
   };
-  if (h.status !== "running") {
+  // Report an exit code only once the child has truly settled (exited/killed) — NOT while
+  // "terminating" (an sh_kill was sent but 'close' hasn't fired yet), else we'd claim a
+  // 137 before the process actually died.
+  if (h.status === "exited" || h.status === "killed") {
     view.exit = h.signal ? 137 : 0; // best-effort; the durable record carries the exact code
     if (h.signal) view.signal = h.signal;
   }
 
-  // Slice a stream from its OWN byte cursor to its current end. The retained window is
-  // the LAST retainedBytes of the totalBytesEver stream, so the available slice starts
-  // at (totalBytesEver - retainedBytes); a cursor before that means bytes were dropped
-  // at the byte cap → gap. Cursors are PER-STREAM: a single shared offset would lose
-  // the shorter stream's new output once the longer stream pulled the cursor past it.
-  const sliceOf = (buf: BoundedBuffer, from: number): { text: string; gap: boolean } => {
+  // Slice a stream from its OWN byte cursor, decoding on the EXACT raw byte range
+  // (rawSlice) so text isn't corrupted by a lossy decode/re-encode round-trip and BINARY
+  // honors the cursor too (base64 of only the new bytes — decode each poll, then concat;
+  // do NOT concat the base64 strings). For text, hold back an incomplete trailing multibyte
+  // sequence so a codepoint is never split across polls, rewinding the returned cursor by
+  // the held-back bytes so the next poll re-reads them whole. A cursor before the retained
+  // window (bytes dropped at the cap) flags a gap. Cursors are PER-STREAM.
+  const sliceOf = (buf: BoundedBuffer, from: number): { text: string; gap: boolean; cursor: number } => {
     const ever = buf.totalBytesEver;
-    const retainedStart = ever - buf.retainedBytes;
-    const gap = from < retainedStart;
-    if (buf.isBinary) return { text: buf.toBase64(), gap };
-    const effectiveStart = Math.max(from, retainedStart);
-    const dropBytes = effectiveStart - retainedStart;
-    const retained = Buffer.from(buf.toString(), "utf8");
-    const text = retained.subarray(Math.min(dropBytes, retained.length)).toString("utf8");
-    return { text, gap };
+    const gap = from < ever - buf.retainedBytes;
+    const raw = buf.rawSlice(from);
+    if (buf.isBinary) return { text: raw.toString("base64"), gap, cursor: ever };
+    const whole = lastCompleteUtf8(raw);
+    return { text: raw.subarray(0, whole).toString("utf8"), gap, cursor: ever - (raw.length - whole) };
   };
 
   let gap = false;
   if (stream === "stdout" || stream === "both") {
     const s = sliceOf(h.out, stdoutCursor ?? 0);
     view.stdout = s.text;
+    view.stdout_cursor = s.cursor;
     gap = gap || s.gap;
   }
   if (stream === "stderr" || stream === "both") {
     const s = sliceOf(h.err, stderrCursor ?? 0);
     view.stderr = s.text;
+    view.stderr_cursor = s.cursor;
     gap = gap || s.gap;
   }
   view.gap = gap;
@@ -304,21 +337,24 @@ export function getLogs(
 
 export interface KillResult {
   id: string;
-  status: "killed" | "not_live";
+  status: "terminating" | "not_live";
   signal?: string;
 }
 
 /**
  * Signal a live background process. SIGTERM uses the 2s SIGTERM→SIGKILL escalation
  * (so a child that ignores SIGTERM is still reaped); other signals are sent once.
- * Returns status:"killed" when a live process was signalled, "not_live" when the id is
- * not in the registry (the caller treats that as an idempotent already_exited if a
- * record exists, else an unknown id).
+ * Returns status:"terminating" when a live process was SIGNALLED — the process is not yet
+ * confirmed dead; it settles to exited/killed only when the OS delivers 'close' (poll
+ * sh_logs to observe that). Returns "not_live" when the id is not in the registry (the
+ * caller treats that as an idempotent already_exited if a record exists, else unknown id).
  */
 export function kill(id: string, signal: NodeJS.Signals): KillResult {
   const h = registry.get(id);
   if (!h) return { id, status: "not_live" };
-  h.status = "killed";
+  // "terminating", NOT "killed": the signal is only SENT here; the child is reaped and
+  // marked killed by the 'close' handler once the OS actually tears it down.
+  h.status = "terminating";
   h.signal = signal;
   if (signal === "SIGTERM") {
     // Cancel any prior escalation before starting a new one (repeated sh_kill).
@@ -327,7 +363,7 @@ export function kill(id: string, signal: NodeJS.Signals): KillResult {
   } else {
     h.killTree(signal);
   }
-  return { id, status: "killed", signal };
+  return { id, status: "terminating", signal };
 }
 
 /** All live handles (for the shutdown coordinator). */

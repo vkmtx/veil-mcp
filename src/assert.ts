@@ -9,6 +9,7 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { ExecResult } from "./types.js";
+import { compileSafe } from "./saferegex.js";
 
 export interface Expectation {
   /** require an exact exit code. */
@@ -94,11 +95,11 @@ export function evaluate(
   if (exp.stdout_matches !== undefined) {
     let pass = false;
     let detail: string | undefined;
-    try {
-      pass = new RegExp(exp.stdout_matches).test(searchable(res.stdout, res.stdoutBinary));
-    } catch (e) {
-      detail = `invalid regex: ${String(e)}`;
-    }
+    // compileSafe refuses catastrophic-backtracking patterns (and invalid syntax) instead
+    // of running them on the single-threaded event loop and hanging the server.
+    const { re, error } = compileSafe(exp.stdout_matches);
+    if (re) pass = re.test(searchable(res.stdout, res.stdoutBinary));
+    else detail = error;
     out.push({ check: `stdout matches /${exp.stdout_matches}/`, pass, detail: detail ?? inconclusiveDetail(pass, res.stdoutTruncated) });
   }
 
