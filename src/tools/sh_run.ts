@@ -98,7 +98,18 @@ export function registerShRun(server: McpServer): void {
         "Pass scrub_env:true to strip credential-shaped env vars from the child (auto-on " +
         "with sandbox protect_secrets/deny_read); no_store:true keeps a sensitive run memory-only.",
       inputSchema: {
-        command: z.string().describe("The shell command to execute."),
+        // Corrective -32602: when `command` is missing (sent under a wrong key —
+        // the SDK validates BEFORE the handler and zod strips unknown keys, so a
+        // handler-side normalizer can never see it), teach the minimal call shape
+        // in-band instead of dumping the raw zod error.
+        command: z
+          .string({
+            error: (iss) =>
+              iss.input === undefined
+                ? 'missing required "command" (string). Minimal call: {"command":"<shell command>"}. Optional: expect, cwd, sandbox, timeout_ms, retries, background via `&` is NOT supported — use Bash for dev servers/TTY.'
+                : undefined,
+          })
+          .describe("The shell command to execute."),
         cwd: z.string().optional().describe("Working directory. Defaults to the server's cwd."),
         full: z
           .boolean()

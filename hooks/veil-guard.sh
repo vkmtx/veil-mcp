@@ -2,28 +2,42 @@
 # veil PreToolUse guard (global, opt-in via ~/.claude/settings.json).
 #
 # Hard-blocks ONLY Bash commands that are clearly VERBOSE (installs/builds/tests)
-# or DANGEROUS (recursive force-delete, dd, mkfs, raw-device writes), steering them
-# to the veil `sh_run` tool (quiet, structured, verifiable, addressable output).
-# Everything else is allowed — the soft preference lives in CLAUDE.md, the hook only
-# enforces the high-value cases.
+# or DANGEROUS (recursive delete, force+glob delete, dd, mkfs, raw-device writes),
+# steering them to the veil `sh_run` tool (quiet, structured, verifiable,
+# addressable output). Everything else is allowed — the soft preference lives in
+# CLAUDE.md, the hook only enforces the high-value cases.
 #
 # Design guarantees:
 #   - FAIL-OPEN: any parse error / missing python3 / unexpected input → allow (exit 0).
 #     A bug here must never be able to block all Bash.
 #   - ESCAPE HATCH: prefix the command with `VEIL_BYPASS=1` to force raw Bash
 #     (for interactive/TTY/streaming cases sh_run can't handle).
+#   - ONE NAG PER SESSION for the VERBOSE class: the first verbose command in a
+#     session blocks with the sh_run steer; after that the model's choice is
+#     respected (marker file keyed on session_id). DANGEROUS always blocks.
 #   - exit 0 = allow; exit 2 = block (reason on stderr is shown to the agent).
 
 # NOTE: pass the program via -c (NOT `python3 -` with a heredoc, which would consume
 # the hook's stdin as the program and never see the JSON).
-CMD=$(/usr/bin/python3 -c 'import sys, json
+OUT=$(/usr/bin/python3 -c 'import sys, json
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 if d.get("tool_name") != "Bash":
     sys.exit(0)
-print(d.get("tool_input", {}).get("command", ""))' 2>/dev/null) || exit 0
+sid = (d.get("session_id") or "nosession").replace("/", "_")
+cmd = d.get("tool_input", {}).get("command", "")
+sys.stdout.write(sid + "\t" + cmd)' 2>/dev/null) || exit 0
+
+# Split SID/CMD on the FIRST real tab. NB: in POSIX parameter-expansion patterns
+# `\t` is a literal escaped `t`, NOT a tab — the delimiter must be a real tab
+# character, quoted so it is matched literally. A UUID session_id can never
+# contain a tab, so the first tab is always the delimiter (and `#` takes the
+# shortest prefix, so a command that itself contains tabs survives intact).
+TAB=$(printf '\t')
+SID=${OUT%%"$TAB"*}
+CMD=${OUT#*"$TAB"}
 
 # No command extracted, or python3 unavailable → fail open.
 [ -n "$CMD" ] || exit 0
@@ -37,15 +51,17 @@ case "$bypass_head" in
   VEIL_BYPASS=1|VEIL_BYPASS=1[[:space:]]*) exit 0 ;;
 esac
 
-# Dangerous: recursive/force delete, content shredding, raw-device / filesystem
-# writes. Verb-led patterns (shred/truncate) are anchored to command position —
-# start of command or just after a shell operator — so the same word as an argument
-# or filename (`cat shred.log`, `psql -c 'truncate table t'`) is NOT mis-blocked;
-# the rest stay operator-bounded so a match can't cross into an unrelated command.
-# Blocked even if backgrounded.
+# Dangerous: RECURSIVE delete (recursion is the blast radius, not -f: a single-file
+# `rm -f build.log` passes; force+GLOB still blocks), content shredding, raw-device /
+# filesystem writes. Verb-led patterns (shred/truncate) are anchored to command
+# position — start of command or just after a shell operator — so the same word as
+# an argument or filename (`cat shred.log`, `psql -c 'truncate table t'`) is NOT
+# mis-blocked; the rest stay operator-bounded so a match can't cross into an
+# unrelated command. Blocked even if backgrounded — and ALWAYS (no one-shot marker).
 if printf '%s' "$CMD" | grep -Eq \
-  -e '\brm[[:space:]]+([^|;&]*[[:space:]])?-[a-z]*[rf]' \
-  -e '\brm\b[^|;&]*--(recursive|force)\b' \
+  -e '\brm[[:space:]]+([^|;&]*[[:space:]])?-[a-zA-Z]*[rR]' \
+  -e '\brm\b[^|;&]*--recursive\b' \
+  -e '\brm\b[^|;&]*-[a-zA-Z]*f[^|;&]*[[:space:]][^|;&[:space:]]*\*' \
   -e '\bgit[[:space:]]+clean\b[^|;&]*[[:space:]](-[a-z]*f|--force)' \
   -e '\bfind\b[^|;&]*[[:space:]]-delete\b' \
   -e '\bfind\b[^|;&]*-exec[[:space:]]+rm\b' \
@@ -55,7 +71,7 @@ if printf '%s' "$CMD" | grep -Eq \
   -e '[[:space:]]>[[:space:]]*/dev/(sd|disk|hd|nvme|vd|mapper)' \
   -e '\bdd[[:space:]]' \
   -e '\bmkfs'; then
-  echo "veil: dangerous command — use sh_run (optionally sandbox:true / sh_checkpoint first), or prefix VEIL_BYPASS=1 to force Bash." >&2
+  echo 'veil: dangerous command — retry EXACTLY as sh_run {"command":"<this same command string>","sandbox":true} (or sh_checkpoint first). Only required key: "command" (string). Prefix VEIL_BYPASS=1 only if sh_run genuinely cannot run it.' >&2
   exit 2
 fi
 
@@ -70,8 +86,13 @@ fi
 # Modern tools (bun/deno/uv) and image builds (docker build / compose build) are just as
 # verbose as npm/pip. Note `docker ps|logs|run` and `docker compose up` are NOT matched here
 # — they are read-only or long-running and fall through to the allow path / raw Bash.
+# ONE NAG PER SESSION: after the first block the model has been told; further verbose
+# commands in the same session are allowed (the CLAUDE.md soft preference still applies).
+MARK="${TMPDIR:-/tmp}/veil-guard-verbose-$SID"
 if printf '%s' "$CMD" | grep -Eq '\b(npm|pnpm|yarn|bun|deno|uv|pip|pip3|cargo|go|gradle|mvn|bundle|composer|gem)\b[^|;&]*\b(install|i|ci|add|build|test|run|sync)\b|\b(make|tsc|webpack|vite|rollup|esbuild|pytest|jest|vitest|mocha)\b|\bdocker(-compose|[[:space:]]+compose)?[[:space:]]+(build|buildx)\b'; then
-  echo "veil: verbose command — prefer sh_run (quiet structured result; full output via sh_detail). Add expect to verify in one call. Prefix VEIL_BYPASS=1 to force Bash." >&2
+  [ -e "$MARK" ] && exit 0           # already nagged this session — respect the model's choice
+  : > "$MARK" 2>/dev/null || true    # marker write failure = still nag (fail toward nudge, never toward block-loop)
+  echo 'veil: verbose command (one nag per session) — retry EXACTLY as sh_run {"command":"<this same command string>","expect":{"exit":0}}. The only required key is "command" (a string; NOT cmd). Full output later via sh_detail. Prefix VEIL_BYPASS=1 to force Bash.' >&2
   exit 2
 fi
 
