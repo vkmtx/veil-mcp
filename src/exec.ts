@@ -43,11 +43,32 @@ export class BoundedBuffer {
         const dropped = this.chunks.shift()!;
         this.bytes -= dropped.length;
       }
+      // A SINGLE retained chunk can still exceed the cap (one push larger than the cap —
+      // the `chunks.length > 1` guard above stops before touching it). Slice it to the
+      // last `cap` bytes so the retained window genuinely respects the cap.
+      if (this.bytes > this.cap && this.chunks.length === 1) {
+        const only = this.chunks[0];
+        const sliced = only.subarray(only.length - this.cap);
+        this.chunks[0] = sliced;
+        this.bytes = sliced.length;
+      }
     }
   }
 
   private view(): Buffer {
     return Buffer.concat(this.chunks);
+  }
+
+  /** Raw retained bytes from absolute offset `fromEver` (a totalBytesEver value) to the
+   *  current end. Bytes before the retained window were dropped at the byte cap and can't
+   *  be returned — the caller compares `fromEver` to (totalBytesEver − retainedBytes) to
+   *  flag a gap. Centralizes byte-cursor slicing so text and binary share ONE correct
+   *  path (decode/encode once, on the exact byte range — no lossy round-trip). */
+  rawSlice(fromEver: number): Buffer {
+    const start = this.everBytes - this.bytes; // ever-offset of the retained window's first byte
+    const skip = Math.max(0, fromEver - start);
+    const v = this.view();
+    return skip >= v.length ? Buffer.alloc(0) : v.subarray(skip);
   }
 
   /** Retained tail decoded as UTF-8. Lossy for binary — use base64 then. */
@@ -116,7 +137,10 @@ export function runCommand(
     // shell does NOT exec into, so killing the shell alone orphans them — they keep
     // the stdout pipe open and the run blocks until they exit, defeating the
     // timeout. Killing the process group (negative pid) reaps the grandchildren too.
-    const child = spawn(command, { cwd, shell: true, env, detached: true });
+    // stdin is /dev/null ("ignore"): the contract is "no stdin", and an inherited/open
+    // stdin makes a child that reads it (e.g. a bare `read`, `cat`) block until the
+    // timeout instead of getting EOF. stdout/stderr stay piped for capture.
+    const child = spawn(command, { cwd, shell: true, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 
     const out = new BoundedBuffer(config.maxStreamBytes);
     const err = new BoundedBuffer(config.maxStreamBytes);

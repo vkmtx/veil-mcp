@@ -29,7 +29,7 @@ const text = (r: any) => r.content[0].text;
 const J = (r: any) => JSON.parse(text(r));
 
 const serverEntry = new URL("../src/index.ts", import.meta.url).pathname;
-const transport = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env } });
+const transport = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env } as Record<string, string> });
 const client = new Client({ name: "stress", version: "0.0.0" });
 await client.connect(transport);
 const run = async (args: Record<string, unknown>) => J(await client.callTool({ name: "sh_run", arguments: args }));
@@ -173,7 +173,10 @@ console.log("E. checkpoint / restore edges");
   const b = mkdtempSync(join(tmpdir(), "veil-ckb-"));
   await client.callTool({ name: "sh_checkpoint", arguments: { label: "s2", dir: a } });
   const wrong = J(await client.callTool({ name: "sh_restore", arguments: { label: "s2", dir: b } }));
-  ok("restore wrong dir refused", typeof wrong.error === "string" && wrong.error.includes("refusing"));
+  // Per-project namespacing (OGL-96) means dir b has its OWN store, so a wrong-dir restore
+  // now fails "no checkpoint named" rather than the sidecar "refusing" guard — either way it
+  // refuses safely (matches the smoke suite). The old probe only accepted "refusing".
+  ok("restore wrong dir refused", typeof wrong.error === "string" && (wrong.error.includes("refusing") || wrong.error.includes("no checkpoint named")));
   rmSync(a, { recursive: true, force: true });
   rmSync(b, { recursive: true, force: true });
 }
@@ -335,4 +338,6 @@ console.log("M. soak / resources");
 
 await client.close();
 console.log(`\n${probes} probes, ${anomalies} anomalies`);
-process.exit(0); // report-only; never fail the run
+// Fail the run when a probe flagged an anomaly, so a regression is caught by CI instead of
+// hiding behind a green exit. (Previously always exited 0 regardless of anomalies.)
+process.exit(anomalies > 0 ? 1 : 0);

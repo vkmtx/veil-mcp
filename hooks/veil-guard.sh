@@ -53,15 +53,23 @@ esac
 
 # Dangerous: RECURSIVE delete (recursion is the blast radius, not -f: a single-file
 # `rm -f build.log` passes; force+GLOB still blocks), content shredding, raw-device /
-# filesystem writes. Verb-led patterns (shred/truncate) are anchored to command
-# position — start of command or just after a shell operator — so the same word as
-# an argument or filename (`cat shred.log`, `psql -c 'truncate table t'`) is NOT
-# mis-blocked; the rest stay operator-bounded so a match can't cross into an
-# unrelated command. Blocked even if backgrounded — and ALWAYS (no one-shot marker).
+# filesystem writes. Verb-led patterns (rm/shred/truncate) are anchored to EXECUTABLE
+# position — start of command, just after a shell operator (| ; & ( { and the 2nd char of
+# && / ||), or after a command runner/keyword (the classify.ts WRAPPERS set + do/then/else)
+# — so the same word as an argument or inside a quote (`echo rm -rf x`, `grep "rm -rf" f`,
+# `cat shred.log`) is NOT mis-blocked, while `sudo rm -rf /`, `timeout 5 rm -rf x`, and
+# `; do rm -rf x` still block. The rest stay operator-bounded so a match can't cross into
+# an unrelated command. Blocked even if backgrounded — ALWAYS.
+# rm at EXECUTABLE position: an exec anchor (start / operator / `{`), then ZERO OR MORE
+# command runners — a WRAPPER word plus its own flag/number args (`timeout 5`, `ionice -c3`,
+# `nice -n 10`) — then `rm`. The arg tokens are restricted to `-…`/digit so the greedy match
+# can never swallow the `rm` itself. `rm` as a plain argument (`echo rm -rf`) has no wrapper
+# chain and no anchor → not matched.
+RMPFX='(^|[|;&({])[[:space:]]*((sudo|doas|env|nice|nohup|command|timeout|time|stdbuf|setsid|ionice|xargs|busybox|do|then|else)[[:space:]]+((-[^|;&()[:space:]]*|[0-9][^|;&()[:space:]]*)[[:space:]]+)*)*rm'
 if printf '%s' "$CMD" | grep -Eq \
-  -e '\brm[[:space:]]+([^|;&]*[[:space:]])?-[a-zA-Z]*[rR]' \
-  -e '\brm\b[^|;&]*--recursive\b' \
-  -e '\brm\b[^|;&]*-[a-zA-Z]*f[^|;&]*[[:space:]][^|;&[:space:]]*\*' \
+  -e "${RMPFX}[[:space:]]+([^|;&]*[[:space:]])?-[a-zA-Z]*[rR]" \
+  -e "${RMPFX}\b[^|;&]*--recursive\b" \
+  -e "${RMPFX}\b[^|;&]*-[a-zA-Z]*f[^|;&]*[[:space:]][^|;&[:space:]]*\*" \
   -e '\bgit[[:space:]]+clean\b[^|;&]*[[:space:]](-[a-z]*f|--force)' \
   -e '\bfind\b[^|;&]*[[:space:]]-delete\b' \
   -e '\bfind\b[^|;&]*-exec[[:space:]]+rm\b' \
