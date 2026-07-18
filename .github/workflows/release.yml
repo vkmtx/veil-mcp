@@ -1,28 +1,79 @@
 name: release
 
-# Publishes to npm when a GitHub Release is published. Dormant until an NPM_TOKEN
-# repository secret is set — without it the publish step is skipped (the job still
-# runs and stays green), so the workflow is safe to merge before npm is wired up.
+# Publishes to npm when a GitHub Release is published. Unlike the previous version this
+# FAILS LOUDLY rather than silently skipping: a release with no publish credential, a
+# tag that disagrees with package.json, or a red gate stops the job (and leaves the
+# release un-published) instead of going green while shipping nothing.
 
 on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm provenance / trusted publishing
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-      - run: npm install
-      - run: npm run typecheck
-      - name: Publish to npm
-        if: ${{ env.NPM_TOKEN != '' }}
-        run: npm publish --access public # prepublishOnly builds dist/
+
+      # Guard: the release tag (vX.Y.Z) must match package.json — otherwise a mistagged
+      # release would publish a version nobody expects. Also fails if the lockfile drifted.
+      - name: Verify tag == package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          LOCK="$(node -p "require('./package-lock.json').version")"
+          echo "tag=$TAG package.json=$PKG lock=$LOCK"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::release tag '$GITHUB_REF_NAME' does not match package.json version '$PKG'"; exit 1
+          fi
+          if [ "$LOCK" != "$PKG" ]; then
+            echo "::error::package-lock.json version '$LOCK' does not match package.json '$PKG' — run npm install and commit the lockfile"; exit 1
+          fi
+
+      # Require a publish credential up front so we fail with a clear message instead of a
+      # late, cryptic npm ENEEDAUTH — or (the old bug) silently skipping and going green.
+      - name: Require publish credential
         env:
-          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret is not set — cannot publish. Add it (or configure npm trusted publishing) before releasing."; exit 1
+          fi
+
+      - run: npm ci
+
+      # Full gate — never publish a tarball that hasn't passed the same checks as a PR.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run backtest
+
+      # Build + install the ACTUAL tarball and run its bin, so a broken files list / bad
+      # bin path / missing dist is caught before publish, not by the first user.
+      - name: Smoke the packed tarball
+        run: |
+          npm pack
+          TARBALL="$(ls veil-mcp-*.tgz)"
+          echo "packed $TARBALL"
+          npm install -g "./$TARBALL"
+          OUT="$(veil-mcp --version)"
+          echo "veil-mcp --version -> $OUT"
+          PKG="$(node -p "require('./package.json').version")"
+          case "$OUT" in
+            *"$PKG"*) echo "tarball bin reports the expected version" ;;
+            *) echo "::error::tarball bin printed '$OUT', expected to contain '$PKG'"; exit 1 ;;
+          esac
+
+      # --provenance attaches a signed build-provenance attestation via the OIDC token
+      # above, so consumers can verify the package was built from this repo+workflow.
+      - name: Publish to npm
+        run: npm publish --provenance --access public # prepublishOnly builds dist/
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
