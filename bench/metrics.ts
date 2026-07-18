@@ -33,7 +33,7 @@ process.env.VEIL_STATE_DIR = mkdtempSync(join(tmpdir(), "veil-metrics-state-"));
 // The actual bet: structure + effects + expect collapse a multi-call run→check→grep
 // loop into ONE MCP call. This is structural (counts calls, not bytes), so it holds
 // regardless of context-window size — the survival argument over token economy.
-console.log("\n=== 1. AGENT TURNS SAVED (MCP round-trips per task) ===");
+console.log("\n=== 1. AGENT TURNS SAVED — scenario model (MCP round-trips per task) ===");
 console.log(pad("task", 40) + padL("raw", 5) + padL("veil", 6) + padL("saved", 7));
 rule();
 let rawTotal = 0, veilTotal = 0;
@@ -47,7 +47,7 @@ console.log(
   pad(`TOTAL across ${TURNS.length} common tasks`, 40) +
     padL(rawTotal, 5) + padL(veilTotal, 6) + padL(rawTotal - veilTotal, 7),
 );
-console.log(`→ ${pct(rawTotal - veilTotal, rawTotal).toFixed(0)}% fewer round-trips (${rawTotal} → ${veilTotal} calls)`);
+console.log(`→ ~${pct(rawTotal - veilTotal, rawTotal).toFixed(0)}% fewer round-trips on this task set (${rawTotal} → ${veilTotal} calls) — a scenario model over ${TURNS.length} hand-picked common tasks, not a live measurement`);
 
 // ── 3. SIGNAL RECALL ──────────────────────────────────────────────────────────
 // Honesty claim made falsifiable: a labeled corpus of logs, each with ONE known

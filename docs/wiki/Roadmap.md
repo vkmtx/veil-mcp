@@ -15,10 +15,11 @@ Status legend: ✅ done · 🧪 experimental · 🔭 planned
 | atomic CoW checkpoints (APFS `clonefile`) | ✅ |
 | real sandbox enforcement (macOS `sandbox-exec`) | ✅ |
 | `veil init` zero-friction setup | ✅ |
+| background / long-running processes (`sh_run background:true`, `sh_logs`, `sh_kill`) for dev servers / watchers | ✅ |
 | Linux sandbox (bubblewrap) | 🧪 needs unprivileged userns |
 | structured syscall trace (Linux `strace`) | 🧪 |
-| namespace-free Linux sandbox (Landlock) — covers containers/Codespaces | 🔭 [#9](https://github.com/vkmtx/veil-mcp/issues/9) |
-| background jobs (`sh_logs` / `sh_stop`) for dev servers / watchers | 🔭 [#10](https://github.com/vkmtx/veil-mcp/issues/10) |
+| namespace-free Linux sandbox (Landlock via `landrun`) — covers containers/Codespaces | 🧪 experimental — arg-builder unit-tested ([#9](https://github.com/vkmtx/veil-mcp/issues/9)) |
+| streaming / PTY (interactive processes) | 🔭 planned |
 
 ### Known platform risk: macOS sandbox-exec deprecation
 
