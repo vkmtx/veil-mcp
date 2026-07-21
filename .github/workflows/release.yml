@@ -1,9 +1,12 @@
 name: release
 
-# Publishes to npm when a GitHub Release is published. Unlike the previous version this
-# FAILS LOUDLY rather than silently skipping: a release with no publish credential, a
-# tag that disagrees with package.json, or a red gate stops the job (and leaves the
-# release un-published) instead of going green while shipping nothing.
+# Publishes to npm when a GitHub Release is published. It FAILS LOUDLY rather than silently
+# skipping: a release with no publish credential, a tag that disagrees with package.json, or
+# a red gate stops the job (and leaves the release un-published) instead of going green while
+# shipping nothing. It is also IDEMPOTENT: if the version is already on the registry (a
+# re-run, or an out-of-band publish) it still runs the gate + tarball smoke to verify the
+# release, but skips the credential check and publish so the run goes green instead of
+# erroring on a duplicate publish.
 
 on:
   release:
@@ -38,9 +41,27 @@ jobs:
             echo "::error::package-lock.json version '$LOCK' does not match package.json '$PKG' — run npm install and commit the lockfile"; exit 1
           fi
 
+      # Idempotency: if this exact version is already on the registry (a re-run, or an
+      # out-of-band publish), skip the credential check + publish below — the gate and
+      # tarball smoke still run to verify the release. Only local package.json values are
+      # used, so there is no untrusted input in this step.
+      - name: Check if already published
+        id: pub
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          if npm view "$NAME@$VER" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VER is already on the registry — running gate + tarball smoke, skipping publish."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # Require a publish credential up front so we fail with a clear message instead of a
       # late, cryptic npm ENEEDAUTH — or (the old bug) silently skipping and going green.
+      # Skipped when the version is already published (nothing to publish).
       - name: Require publish credential
+        if: steps.pub.outputs.already == 'false'
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -73,7 +94,9 @@ jobs:
 
       # --provenance attaches a signed build-provenance attestation via the OIDC token
       # above, so consumers can verify the package was built from this repo+workflow.
+      # Skipped when the version is already on the registry (idempotent re-run).
       - name: Publish to npm
+        if: steps.pub.outputs.already == 'false'
         run: npm publish --provenance --access public # prepublishOnly builds dist/
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
