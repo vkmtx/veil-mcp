@@ -210,8 +210,19 @@ runners — `npm`/`pnpm`/`yarn`/`bun`/`deno`/`uv`/`pip`/`cargo`/`go`/…, plus
 backgrounded jobs (trailing `&`), process management (`kill`/`pkill`), and
 interactive/TTY tools (`vim`/`less`/`top`/`tail -f`). It is **fail-open** (any parse
 error → allow, so a bug can never block all Bash), with an escape hatch: prefix a
-command with `VEIL_BYPASS=1` to force raw Bash. Enable globally in
-`~/.claude/settings.json`:
+command with `VEIL_BYPASS=1` to force raw Bash.
+
+It classifies what the shell will **execute**, not what the command string contains:
+heredoc bodies and quoted strings are stripped before matching (so a commit message
+mentioning "build", or `grep -E '"(tsc|build)"' package.json`, is not a build), and
+every tool name must sit at executable position — start of command, after an operator,
+or behind a runner like `sudo`/`timeout`/`npx` — so `grep -rn "HttpApiGroup.make" src`
+passes while `npx vitest run` still blocks. Deleting a regenerable build artifact
+(`rm -rf .next|dist|build|out|coverage|.turbo|node_modules/.cache`, relative or under an
+absolute project path) is **not** treated as dangerous, which keeps the dev-server
+restart idiom (`pkill …; rm -rf .next; nohup next dev …`) on the allow path; anything
+unresolvable — a glob, `..`, `~`, `$VAR`, a root-level path, or one non-build target in
+the list — still blocks. Enable globally in `~/.claude/settings.json`:
 
 ```jsonc
 { "hooks": { "PreToolUse": [

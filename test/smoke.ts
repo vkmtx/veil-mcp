@@ -289,6 +289,27 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   check("guard: blocks nohup rm -rf (wrapper)", guardExit("nohup rm -rf /tmp/x") === 2);
   check("guard: blocks rm -rf in a for/do loop", guardExit('for f in *; do rm -rf "$f"; done') === 2);
   check("guard: blocks rm -rf in a brace group", guardExit("{ rm -rf /tmp/x; }") === 2);
+  // Sanitizer: the classifier sees what the shell EXECUTES, not what the string contains.
+  // Quoted data and heredoc bodies are not commands — these are read-only and must pass.
+  check("guard: allows grep of quoted script names", guardExit(`grep -E '"(tsc|test|build|lint)"' package.json`) === 0);
+  check("guard: allows grep of a symbol containing .make", guardExit('grep -rn "HttpApiGroup.make" src --include=*.ts') === 0);
+  check("guard: allows a commit whose heredoc body says build/make", guardExit("git commit -q -F - <<'EOF'\nfeat: x\n\nmake the build green\nEOF") === 0);
+  check("guard: allows make as a plain argument", guardExit("cat notes.md | grep make") === 0);
+  // ...but a verbose tool at EXECUTABLE position still blocks, including behind a runner,
+  // after an operator, on a later line, and via an explicit path.
+  for (const cmd of ["npx vitest run test/x.test.ts", "git stash && npx vitest run a.test.tsx", "cd /tmp && pnpm build", "./node_modules/.bin/vitest", "cd /tmp\npnpm test"]) {
+    check(`guard: blocks verbose at exec position ${JSON.stringify(cmd)}`, guardExit(cmd) === 2);
+  }
+  // Build-artifact deletes are regenerable, not data loss — and DANGEROUS used to fire
+  // before the ALLOW list could ever see the dev-server restart idiom.
+  for (const cmd of ["rm -rf .next", "rm -rf dist", "rm -rf .next dist coverage", "rm -rf /Users/x/proj/app/.next", "rm -rf node_modules/.cache"]) {
+    check(`guard: allows build-dir delete ${cmd}`, guardExit(cmd) === 0);
+  }
+  check("guard: allows the dev-server restart idiom", guardExit('pkill -f "next dev -p 3077"; sleep 2; rm -rf .next; nohup npx next dev -p 3077 > /tmp/d.log 2>&1 &') === 0);
+  // The exemption is narrow: anything unresolvable or non-build still blocks.
+  for (const cmd of ["rm -rf data", "rm -rf /dist", "rm -rf ../dist", "rm -rf ~/dist", "rm -rf $BUILD", "rm -rf dist*", "rm -rf .next /etc/nginx", "rm -rf dist && rm -rf /srv/data"]) {
+    check(`guard: still blocks ${cmd}`, guardExit(cmd) === 2);
+  }
   // One nag per session: same session_id → first verbose call blocks (steer to
   // sh_run), second is allowed; DANGEROUS still blocks in that same session.
   const oneshotSid = `${guardSidPrefix}-oneshot-${Date.now()}`;

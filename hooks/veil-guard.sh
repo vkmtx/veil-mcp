@@ -16,10 +16,39 @@
 #     session blocks with the sh_run steer; after that the model's choice is
 #     respected (marker file keyed on session_id). DANGEROUS always blocks.
 #   - exit 0 = allow; exit 2 = block (reason on stderr is shown to the agent).
+#   - MATCH THE CODE, NOT THE PROSE: the classifier below runs on a SANITIZED copy
+#     of the command (see the sanitizer contract), so a build word quoted as data
+#     or buried in a commit message can never trip it.
 
 # NOTE: pass the program via -c (NOT `python3 -` with a heredoc, which would consume
 # the hook's stdin as the program and never see the JSON).
-OUT=$(/usr/bin/python3 -c 'import sys, json
+#
+# SANITIZER CONTRACT — emits `session_id \t scan`, where `scan` is a single-line,
+# match-only rendering of the command. The raw command is never classified directly,
+# because every pattern below is about what the shell will EXECUTE, not what the
+# string happens to contain:
+#   1. Heredoc bodies are dropped (`git commit -F - <<EOF … EOF`): a commit message
+#      that mentions "build" or "make" is prose, not a build.
+#   2. Quoted strings collapse to a neutral ` Q ` token: `grep -E "(tsc|build)" pkg.json`
+#      is a search for that text, not an invocation of it.
+#   3. Newlines become ` ; ` — every operator-bounded pattern (`[^|;&]*`) then stops at a
+#      line break instead of matching across two unrelated commands.
+#   4. `rm -rf <build dir>` collapses to ` RMBUILD `: wiping `.next`/`dist`/`coverage`
+#      is a regenerable-artifact delete, not data loss, and it is the second half of the
+#      dev-server restart idiom (`pkill …; rm -rf .next; nohup next dev …`) — which the
+#      DANGEROUS class used to block before the ALLOW list could ever see it. Anything
+#      unresolvable (glob, `..`, `~`, `$VAR`, a root-level absolute path, or a single
+#      non-build target in the list) is left intact and still blocks.
+# TRADEOFF, stated plainly: sanitizing before the DANGEROUS class too means a dangerous
+# verb that only ever appears inside quotes (`sh -c "dd if=/dev/zero of=/dev/disk0"`) is
+# no longer matched. That is deliberate and consistent with what this hook is — a routing
+# nudge, fail-open and VEIL_BYPASS-able, never a security boundary (real containment is
+# sh_run sandbox:true). The false positives it removes are not hypothetical: this guard
+# blocked the very commit that added its own test corpus, because the heredoc body and the
+# quoted `"rm -rf x"` fixtures read as commands.
+# NB: the python source is embedded in a single-quoted shell string and therefore may
+# not contain a literal apostrophe — hence chr(39).
+OUT=$(/usr/bin/python3 -c 'import sys, json, re
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -28,13 +57,46 @@ if d.get("tool_name") != "Bash":
     sys.exit(0)
 sid = (d.get("session_id") or "nosession").replace("/", "_")
 cmd = d.get("tool_input", {}).get("command", "")
-sys.stdout.write(sid + "\t" + cmd)' 2>/dev/null) || exit 0
+SQ = chr(39)
+NL = chr(10)
+BUILD = set(".next .nuxt .turbo .svelte-kit .astro .expo .vite .parcel-cache .cache .pytest_cache __pycache__ dist build out coverage".split())
+HD = re.compile("<<-?[ \t]*[" + SQ + "\"]?([A-Za-z_][A-Za-z0-9_]*)")
+kept = []
+tag = None
+for ln in cmd.split(NL):
+    if tag is None:
+        kept.append(ln)
+        m = HD.search(ln)
+        if m:
+            tag = m.group(1)
+    elif ln.strip() == tag:
+        tag = None
+s = NL.join(kept)
+s = re.sub(SQ + "[^" + SQ + "]*" + SQ, " Q ", s)
+s = re.sub("\"[^\"]*\"", " Q ", s)
+s = s.replace(chr(9), " ").replace(chr(13), " ").replace(NL, " ; ")
+def keep_rm(m):
+    toks = m.group(2).split()
+    targets = [t for t in toks[1:] if not t.startswith("-")]
+    if not targets:
+        return m.group(0)
+    for t in targets:
+        if "*" in t or ".." in t or t.startswith("~") or t.startswith("$"):
+            return m.group(0)
+        p = t.rstrip("/")
+        if p.split("/")[-1] not in BUILD:
+            return m.group(0)
+        if p.startswith("/") and p.count("/") < 3:
+            return m.group(0)
+    return m.group(1) + " RMBUILD "
+s = re.sub("(^|[|;&({])([ \t]*rm[ \t]+[^|;&()]*)", keep_rm, s)
+sys.stdout.write(sid + "\t" + s)' 2>/dev/null) || exit 0
 
-# Split SID/CMD on the FIRST real tab. NB: in POSIX parameter-expansion patterns
+# Split SID/SCAN on the FIRST real tab. NB: in POSIX parameter-expansion patterns
 # `\t` is a literal escaped `t`, NOT a tab — the delimiter must be a real tab
 # character, quoted so it is matched literally. A UUID session_id can never
-# contain a tab, so the first tab is always the delimiter (and `#` takes the
-# shortest prefix, so a command that itself contains tabs survives intact).
+# contain a tab, and the sanitizer strips tabs out of the command, so the first
+# tab is always the delimiter.
 TAB=$(printf '\t')
 SID=${OUT%%"$TAB"*}
 CMD=${OUT#*"$TAB"}
@@ -56,10 +118,10 @@ esac
 # filesystem writes. Verb-led patterns (rm/shred/truncate) are anchored to EXECUTABLE
 # position — start of command, just after a shell operator (| ; & ( { and the 2nd char of
 # && / ||), or after a command runner/keyword (the classify.ts WRAPPERS set + do/then/else)
-# — so the same word as an argument or inside a quote (`echo rm -rf x`, `grep "rm -rf" f`,
-# `cat shred.log`) is NOT mis-blocked, while `sudo rm -rf /`, `timeout 5 rm -rf x`, and
-# `; do rm -rf x` still block. The rest stay operator-bounded so a match can't cross into
-# an unrelated command. Blocked even if backgrounded — ALWAYS.
+# — so the same word as an argument (`echo rm -rf x`, `cat shred.log`) is NOT mis-blocked,
+# while `sudo rm -rf /`, `timeout 5 rm -rf x`, and `; do rm -rf x` still block. The rest
+# stay operator-bounded so a match can't cross into an unrelated command. Blocked even if
+# backgrounded — ALWAYS.
 # rm at EXECUTABLE position: an exec anchor (start / operator / `{`), then ZERO OR MORE
 # command runners — a WRAPPER word plus its own flag/number args (`timeout 5`, `ionice -c3`,
 # `nice -n 10`) — then `rm`. The arg tokens are restricted to `-…`/digit so the greedy match
@@ -79,7 +141,7 @@ if printf '%s' "$CMD" | grep -Eq \
   -e '[[:space:]]>[[:space:]]*/dev/(sd|disk|hd|nvme|vd|mapper)' \
   -e '\bdd[[:space:]]' \
   -e '\bmkfs'; then
-  echo 'veil: dangerous command — retry EXACTLY as sh_run {"command":"<this same command string>","sandbox":true} (or sh_checkpoint first). Only required key: "command" (string). Prefix VEIL_BYPASS=1 only if sh_run genuinely cannot run it.' >&2
+  echo 'veil: dangerous command — retry EXACTLY as sh_run {"command":"<this same command string>"}. Only required key: "command" (string). Add "sandbox":true ONLY if the command must not write outside cwd (it refuses to run when no sandbox is available); sh_checkpoint first if you may need to roll back. Prefix VEIL_BYPASS=1 only if sh_run genuinely cannot run it.' >&2
   exit 2
 fi
 
@@ -94,10 +156,20 @@ fi
 # Modern tools (bun/deno/uv) and image builds (docker build / compose build) are just as
 # verbose as npm/pip. Note `docker ps|logs|run` and `docker compose up` are NOT matched here
 # — they are read-only or long-running and fall through to the allow path / raw Bash.
+# EXECUTABLE POSITION, same as RMPFX: the tool name must be what the shell RUNS. An
+# unanchored `\b(make|tsc|vitest|…)\b` matched the word anywhere and blocked read-only
+# greps (`grep -rn "HttpApiGroup.make" src`) and package.json lookups. EXPFX adds the
+# runner chain (incl. `npx`/`bunx`/`uvx`, so `npx vitest run` still blocks) plus an
+# optional path prefix, so `./node_modules/.bin/vitest` and `/usr/bin/make` still match
+# while `HttpApiGroup.make` — no anchor, no trailing slash — does not.
 # ONE NAG PER SESSION: after the first block the model has been told; further verbose
 # commands in the same session are allowed (the CLAUDE.md soft preference still applies).
+EXPFX='(^|[|;&({])[[:space:]]*((sudo|doas|env|nice|nohup|command|timeout|time|stdbuf|setsid|ionice|xargs|busybox|npx|bunx|pnpx|uvx|pipx|do|then|else)[[:space:]]+((-[^|;&()[:space:]]*|[0-9][^|;&()[:space:]]*)[[:space:]]+)*)*([A-Za-z0-9._~+/-]*/)?'
 MARK="${TMPDIR:-/tmp}/veil-guard-verbose-$SID"
-if printf '%s' "$CMD" | grep -Eq '\b(npm|pnpm|yarn|bun|deno|uv|pip|pip3|cargo|go|gradle|mvn|bundle|composer|gem)\b[^|;&]*\b(install|i|ci|add|build|test|run|sync)\b|\b(make|tsc|webpack|vite|rollup|esbuild|pytest|jest|vitest|mocha)\b|\bdocker(-compose|[[:space:]]+compose)?[[:space:]]+(build|buildx)\b'; then
+if printf '%s' "$CMD" | grep -Eq \
+  -e "${EXPFX}(npm|pnpm|yarn|bun|deno|uv|pip|pip3|cargo|go|gradle|mvn|bundle|composer|gem)\b[^|;&]*\b(install|i|ci|add|build|test|run|sync)\b" \
+  -e "${EXPFX}(make|tsc|webpack|vite|rollup|esbuild|pytest|jest|vitest|mocha)\b" \
+  -e "${EXPFX}docker(-compose|[[:space:]]+compose)?[[:space:]]+(build|buildx)\b"; then
   [ -e "$MARK" ] && exit 0           # already nagged this session — respect the model's choice
   : > "$MARK" 2>/dev/null || true    # marker write failure = still nag (fail toward nudge, never toward block-loop)
   echo 'veil: verbose command (one nag per session) — retry EXACTLY as sh_run {"command":"<this same command string>","expect":{"exit":0}}. The only required key is "command" (a string; NOT cmd). Full output later via sh_detail. Prefix VEIL_BYPASS=1 to force Bash.' >&2
