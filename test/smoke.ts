@@ -295,6 +295,9 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   check("guard: allows grep of a symbol containing .make", guardExit('grep -rn "HttpApiGroup.make" src --include=*.ts') === 0);
   check("guard: allows a commit whose heredoc body says build/make", guardExit("git commit -q -F - <<'EOF'\nfeat: x\n\nmake the build green\nEOF") === 0);
   check("guard: allows make as a plain argument", guardExit("cat notes.md | grep make") === 0);
+  // A herestring is not a heredoc: `<<<` must not swallow the following lines as body
+  // text, which would silently un-scan the command that actually matters.
+  check("guard: herestring does not swallow the next line", guardExit('grep -q x <<<"payload"\nrm -rf /srv/data') === 2);
   // ...but a verbose tool at EXECUTABLE position still blocks, including behind a runner,
   // after an operator, on a later line, and via an explicit path.
   for (const cmd of ["npx vitest run test/x.test.ts", "git stash && npx vitest run a.test.tsx", "cd /tmp && pnpm build", "./node_modules/.bin/vitest", "cd /tmp\npnpm test"]) {

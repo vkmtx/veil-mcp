@@ -28,7 +28,10 @@
 # because every pattern below is about what the shell will EXECUTE, not what the
 # string happens to contain:
 #   1. Heredoc bodies are dropped (`git commit -F - <<EOF … EOF`): a commit message
-#      that mentions "build" or "make" is prose, not a build.
+#      that mentions "build" or "make" is prose, not a build. A herestring (`<<<"x"`)
+#      is NOT a heredoc — without the negative lookahead its 2nd/3rd `<` parse as a
+#      `<<` and the whole rest of the command gets swallowed as body text, silently
+#      un-scanning the very lines that matter.
 #   2. Quoted strings collapse to a neutral ` Q ` token: `grep -E "(tsc|build)" pkg.json`
 #      is a search for that text, not an invocation of it.
 #   3. Newlines become ` ; ` — every operator-bounded pattern (`[^|;&]*`) then stops at a
@@ -60,7 +63,7 @@ cmd = d.get("tool_input", {}).get("command", "")
 SQ = chr(39)
 NL = chr(10)
 BUILD = set(".next .nuxt .turbo .svelte-kit .astro .expo .vite .parcel-cache .cache .pytest_cache __pycache__ dist build out coverage".split())
-HD = re.compile("<<-?[ \t]*[" + SQ + "\"]?([A-Za-z_][A-Za-z0-9_]*)")
+HD = re.compile("(?<!<)<<(?!<)-?[ \t]*[" + SQ + "\"]?([A-Za-z_][A-Za-z0-9_]*)")
 kept = []
 tag = None
 for ln in cmd.split(NL):
