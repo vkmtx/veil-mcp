@@ -295,6 +295,44 @@ export function list(dir: string = process.cwd()): string[] {
   return readdirSync(store).filter((f) => !/\.(staging|old)\.\d+$/.test(f));
 }
 
+/**
+ * The most recently taken checkpoint for `dir`, or undefined when there is none.
+ * Ordered by the snapshot directory's mtime, which checkpoint()'s atomic rename stamps
+ * at swap time — so "latest" means last COMPLETED checkpoint, not last started.
+ * Backs `sh_restore` with no label: the safety net's whole point is "undo the thing I
+ * just did", and that shouldn't require having named it.
+ */
+export function latest(dir: string = process.cwd()): string | undefined {
+  const store = storeFor(dir);
+  const labels = list(dir);
+  let best: { label: string; at: number } | undefined;
+  for (const label of labels) {
+    let at = 0;
+    try {
+      at = statSync(join(store, label)).mtimeMs;
+    } catch {
+      continue; // vanished between readdir and stat — skip, never throw from a lookup
+    }
+    if (!best || at > best.at) best = { label, at };
+  }
+  return best?.label;
+}
+
+/**
+ * An unused `auto-N` label for `dir` (N = 1 + the highest existing auto-N). Backs
+ * `sh_checkpoint` with no label: naming a rollback point is friction at exactly the
+ * moment the agent is about to do something risky, and a fixed name would silently
+ * overwrite the previous rollback point.
+ */
+export function autoLabel(dir: string = process.cwd()): string {
+  let max = 0;
+  for (const label of list(dir)) {
+    const m = /^auto-(\d+)$/.exec(label);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `auto-${max + 1}`;
+}
+
 /** Delete a checkpoint and its sidecar, scoped to the project at `dir` (defaults to cwd). */
 export function drop(label: string, dir: string = process.cwd()): void {
   const p = containedPath(storeFor(dir), label);

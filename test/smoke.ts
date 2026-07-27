@@ -33,9 +33,11 @@ process.env.VEIL_STATE_DIR = STATE_BASE;
 
 let failures = 0;
 let total = 0;
-function check(name: string, cond: boolean): void {
+function check(name: string, cond: boolean, detail?: string): void {
   total++;
-  console.log(`${cond ? "✓" : "✗"} ${name}`);
+  // `detail` is printed only on failure — a green run stays scannable, but a red one
+  // carries the actual value instead of forcing a re-run to find out what it was.
+  console.log(`${cond ? "✓" : "✗"} ${name}${cond || !detail ? "" : ` — ${detail}`}`);
   if (!cond) failures++;
 }
 function text(r: any): string {
@@ -313,6 +315,26 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   for (const cmd of ["rm -rf data", "rm -rf /dist", "rm -rf ../dist", "rm -rf ~/dist", "rm -rf $BUILD", "rm -rf dist*", "rm -rf .next /etc/nginx", "rm -rf dist && rm -rf /srv/data"]) {
     check(`guard: still blocks ${cmd}`, guardExit(cmd) === 2);
   }
+  // WHOLE-DIFF DUMPS (0.8.0): a 30-day audit of real sessions found 133 raw-Bash results
+  // over 20k chars, and the top offenders were all full `git diff` / `git show` — none of
+  // which the package-manager patterns matched. The agent almost always wants one hunk,
+  // which is what sh_detail match= gives.
+  for (const cmd of ["git diff", "git diff --cached", "git diff dev..feat | cat", "git diff HEAD~3 -- src/app.ts", "git show a1b2c3d", "git -C /tmp/repo diff main..dev", "git log -p -3"]) {
+    check(`guard: blocks whole-diff dump ${cmd}`, guardExit(cmd) === 2);
+  }
+  // ...but a diff that is ALREADY small (summary flags) or ALREADY bounded by the caller
+  // (a limiting pipe) has nothing to condense and must pass. `| cat` is not bounding.
+  for (const cmd of ["git diff --stat", "git diff --name-only dev..feat", "git diff --numstat", "git diff --quiet || echo dirty", "git diff | head -40", 'git diff dev..feat | grep -c "^+"', "git log --oneline -10"]) {
+    check(`guard: allows bounded diff ${cmd}`, guardExit(cmd) === 0);
+  }
+  // ALLOW anchoring (0.8.0 bug): dev/serve/watch/preview/start used to match ANYWHERE in
+  // the string, and ALLOW short-circuits the whole guard — so a branch or path named `dev`
+  // silently disabled the guard for that command. They are anchored to a run target now.
+  check("guard: a branch named dev does not disable the guard", guardExit("git diff dev..feat") === 2 && guardExit("pnpm test # against dev") === 2);
+  for (const cmd of ["npm run dev", "npm start", "pnpm dev", "yarn serve", "next dev -p 3001", "vite preview", "python manage.py runserver", "pnpm build --watch"]) {
+    check(`guard: still allows dev server ${cmd}`, guardExit(cmd) === 0);
+  }
+
   // One nag per session: same session_id → first verbose call blocks (steer to
   // sh_run), second is allowed; DANGEROUS still blocks in that same session.
   const oneshotSid = `${guardSidPrefix}-oneshot-${Date.now()}`;
@@ -432,21 +454,29 @@ await client.connect(transport);
 
 const tools = (await client.listTools()).tools.map((t) => t.name);
 check("lists sh_run + sh_detail", tools.includes("sh_run") && tools.includes("sh_detail"));
-check("lists sh_history", tools.includes("sh_history"));
+// Pin the SHIPPED SURFACE. Every tool costs a slot in the agent's context on every
+// request, so growing (or regrowing) the list must be a deliberate edit here — this is
+// what keeps a 0-call tool like the removed sh_plan/sh_history from creeping back in.
+const SHIPPED_TOOLS = ["sh_run", "sh_detail", "sh_checkpoint", "sh_restore", "sh_checkpoints", "sh_logs", "sh_kill"];
+check(
+  "ships exactly the expected tool surface",
+  tools.length === SHIPPED_TOOLS.length && SHIPPED_TOOLS.every((t) => tools.includes(t)),
+  `got: ${[...tools].sort().join(", ")}`,
+);
 // VER-1: the version advertised over the MCP handshake must equal package.json (not a
 // hardcoded literal that drifts). server.ts derives it via createRequire.
 const pkgVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 check("server handshake version == package.json", client.getServerVersion()?.version === pkgVersion);
 
-// 0b) corrective -32602: a sh_run call missing `command` (e.g. sent under a wrong
-// key like `cmd` — zod strips unknown keys before the handler) must fail with a
-// message that teaches the minimal call shape in-band, not a raw zod dump.
-// Depending on SDK version the validation error arrives as an isError tool result
-// or a thrown McpError — accept the corrective message through either channel.
+// 0b) corrective error: a sh_run call carrying NO command under any key must fail with
+// a message that teaches the minimal call shape in-band, not a raw zod dump. (`cmd` is
+// no longer such a call — it is an accepted alias now, asserted in §26; this pins the
+// genuinely empty call, where there is nothing to infer.) Depending on SDK version the
+// error arrives as an isError tool result or a thrown McpError — accept either channel.
 let missingCmdMsg = "";
 let missingCmdErr = false;
 try {
-  const bad: any = await client.callTool({ name: "sh_run", arguments: { cmd: "echo hi" } });
+  const bad: any = await client.callTool({ name: "sh_run", arguments: {} });
   missingCmdErr = bad?.isError === true;
   missingCmdMsg = String(bad?.content?.[0]?.text ?? "");
 } catch (e: any) {
@@ -553,32 +583,49 @@ rmSync(repo2, { recursive: true, force: true });
 const nr = JSON.parse(text(await client.callTool({ name: "sh_run", arguments: { command: "exit 3", retries: 2, retry_on_exit: [1] } })));
 check("no retry when exit not in retry_on_exit", nr.exit === 3 && nr.attempts === undefined);
 
-// 12) sh_plan (B + K-lite) — classification without execution
-const planRm = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "rm -rf build" } })));
+// 12) classifier taxonomy — classification without execution.
+//
+// The standalone `sh_plan` TOOL was removed in 0.8.0 (a 30-day audit of real Claude Code
+// sessions measured 0 calls across 3.5k sessions). The classifier it wrapped is unchanged
+// and still gates every sh_run, so its taxonomy is asserted DIRECTLY against classify():
+// identical coverage, no MCP round-trip, and a failure now points at the unit that owns
+// the behavior instead of at a transport.
+const plan = (command: string) => {
+  const c = classify(command);
+  return {
+    command,
+    category: c.category,
+    reversible: c.reversible,
+    mutations: c.mutations,
+    note: c.note,
+    warning: c.category === "destructive" ? "DESTRUCTIVE — consider sh_checkpoint before running, or confirm with the user." : undefined,
+  };
+};
+const planRm = plan("rm -rf build");
 check("plan flags destructive", planRm.category === "destructive" && typeof planRm.warning === "string");
-const planLs = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "ls -la" } })));
+const planLs = plan("ls -la");
 check("plan marks read-only", planLs.category === "read-only");
-const planPipe = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "cat a | grep b > c" } })));
+const planPipe = plan("cat a | grep b > c");
 check("plan marks complex on shell ops", planPipe.category === "complex");
-// plan must not execute: target file must not appear
+// classify must stay PURE: analyzing a mutating command must not perform it.
 const planDir = mkdtempSync(join(tmpdir(), "veil-plan-"));
-await client.callTool({ name: "sh_plan", arguments: { command: `touch ${join(planDir, "should_not_exist")}` } });
+plan(`touch ${join(planDir, "should_not_exist")}`);
 check("plan does not execute", !existsSync(join(planDir, "should_not_exist")));
 rmSync(planDir, { recursive: true, force: true }); // don't leak the temp dir
 
 // 12b) git is classified per-subcommand, not as a blanket read-only binary.
 // Regression: `git push --force` / `git reset --hard` previously read as read-only. (bug found v0.2)
-const gitPush = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "git push origin main --force" } })));
+const gitPush = plan("git push origin main --force");
 check("plan flags force-push destructive", gitPush.category === "destructive" && typeof gitPush.warning === "string");
-const gitReset = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "git reset --hard HEAD~3" } })));
+const gitReset = plan("git reset --hard HEAD~3");
 check("plan flags reset --hard destructive", gitReset.category === "destructive");
-const gitStatus = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "git status -s" } })));
+const gitStatus = plan("git status -s");
 check("plan keeps git status read-only", gitStatus.category === "read-only");
-const gitClean = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "git clean -fd" } })));
+const gitClean = plan("git clean -fd");
 check("plan flags git clean -fd destructive", gitClean.category === "destructive");
 
 // 12c) raw block-device redirect is destructive (the prior \b>-anchored regex was dead). (bug found v0.2)
-const devWrite = JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: "echo wipe > /dev/sda" } })));
+const devWrite = plan("echo wipe > /dev/sda");
 check("plan flags raw-device write destructive", devWrite.category === "destructive");
 
 // 13) checkpoint + restore (C) — undo a deletion
@@ -648,8 +695,8 @@ const chgNg = JSON.parse(text(await client.callTool({ name: "sh_run", arguments:
 check("changed in non-git dir fails with detail", chgNg.assert_ok === false && chgNg.assertions_failed.some((a: string) => a.includes("not a git repo")));
 rmSync(chgNoGit, { recursive: true, force: true });
 
-// ── 18) classify taxonomy via sh_plan ──
-const P = async (c: string) => JSON.parse(text(await client.callTool({ name: "sh_plan", arguments: { command: c } })));
+// ── 18) classify taxonomy (see §12 for why this asserts classify() directly) ──
+const P = plan;
 check("plan dd destructive", (await P("dd if=/dev/zero of=x")).category === "destructive");
 check("plan mkfs destructive", (await P("mkfs.ext4 /dev/sdb")).category === "destructive");
 check("plan rm split flags destructive", (await P("rm -r -f /tmp/x")).category === "destructive");
@@ -1019,32 +1066,59 @@ check("changed assertion still forces effect-diff when effects off", noFxForced.
 rmSync(fxRepo, { recursive: true, force: true });
 await noFxC.close();
 
-// ── 26) sh_history (Idea 3) — DESCRIPTIVE aggregates over past runs ──
-const histDir = mkdtempSync(join(tmpdir(), "veil-hist-state-"));
-const hT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_STATE_DIR: histDir } });
-const hC = new Client({ name: "smoke-hist", version: "0.0.0" });
-await hC.connect(hT);
-const hWork = mkdtempSync(join(tmpdir(), "veil-hist-work-"));
-// three identical successful runs → one group, n=3.
-for (let i = 0; i < 3; i++) await hC.callTool({ name: "sh_run", arguments: { command: "echo hi", cwd: hWork } });
-const hist = JSON.parse(text(await hC.callTool({ name: "sh_history", arguments: { command: "echo hi" } })));
-check("sh_history groups exact command with n", hist.groups.length === 1 && hist.groups[0].n === 3 && hist.groups[0].command === "echo hi");
-check("sh_history reports exit0 + duration percentiles", hist.groups[0].exit0 === 3 && hist.groups[0].nonzero === 0 && typeof hist.groups[0].duration_ms.p50 === "number");
-check("sh_history reports recency window", typeof hist.groups[0].window.first === "string" && typeof hist.groups[0].window.span_h === "number");
-check("sh_history is descriptive (note, no prediction)", typeof hist.note === "string" && hist.note.includes("descriptive") && !JSON.stringify(hist).includes("likely"));
-// a retry-recovering run is reported as recovered N/M.
-const flagH = join(hWork, "flagH");
-const retCmd = `test -f ${flagH} && echo ok || (touch ${flagH}; exit 1)`;
-const rh = JSON.parse(text(await hC.callTool({ name: "sh_run", arguments: { command: retCmd, cwd: hWork, retries: 1 } })));
-check("retry-recovering run succeeded on 2nd attempt", rh.ok === true && rh.attempts === 2);
-const histRet = JSON.parse(text(await hC.callTool({ name: "sh_history", arguments: { command: retCmd } })));
-check("sh_history surfaces retry recovery", histRet.groups[0].retried === "recovered 1/1");
-// like-filter matches the echo group.
-const histLike = JSON.parse(text(await hC.callTool({ name: "sh_history", arguments: { like: "echo hi" } })));
-check("sh_history like-filter matches the group", histLike.matched === 3 && histLike.groups.some((g: any) => g.command === "echo hi"));
-rmSync(hWork, { recursive: true, force: true });
-await hC.close();
-rmSync(histDir, { recursive: true, force: true });
+// ── 26) ARG ERGONOMICS — the call shapes that measurably failed in real sessions ──
+//
+// A 30-day audit of Claude Code session logs found 5 of 7 sh_* errors were argument
+// shape, not execution: `cmd` instead of `command`, and a missing `id`/`label` on
+// sh_detail/sh_logs/sh_kill/sh_checkpoint. Each cost a whole turn. These assert the
+// tools now accept the obvious call — and that a wrong id names the valid ones.
+const ergDir = mkdtempSync(join(tmpdir(), "veil-erg-state-"));
+const eT = new StdioClientTransport({ command: "npx", args: ["tsx", serverEntry], env: { ...process.env, VEIL_STATE_DIR: ergDir } });
+const eC = new Client({ name: "smoke-erg", version: "0.0.0" });
+await eC.connect(eT);
+const ergWork = mkdtempSync(join(tmpdir(), "veil-erg-work-"));
+
+// `cmd` is accepted as an alias for `command` and actually RUNS (it used to hard-fail).
+const aliased = JSON.parse(text(await eC.callTool({ name: "sh_run", arguments: { cmd: "echo aliased", cwd: ergWork } })));
+check("sh_run accepts the cmd alias", aliased.ok === true && aliased.stdout === "aliased");
+
+// sh_detail with NO id resolves to the most recent run (selector stdout returns the raw
+// stream, so identity is asserted through meta).
+const lastMeta = JSON.parse(text(await eC.callTool({ name: "sh_detail", arguments: { selector: "meta" } })));
+const lastStdout = text(await eC.callTool({ name: "sh_detail", arguments: { selector: "stdout" } }));
+check("sh_detail defaults to the most recent run", lastMeta.id === aliased.id && lastMeta.command === "echo aliased" && lastStdout.includes("aliased"));
+
+// An unknown id names the ids that ARE addressable instead of a bare "unknown id".
+const badId = JSON.parse(text(await eC.callTool({ name: "sh_detail", arguments: { id: "cmd9999" } })));
+check("sh_detail unknown id lists valid ids", String(badId.error).includes("cmd9999") && String(badId.error).includes(aliased.id));
+
+// sh_logs / sh_kill with NO id target the newest live background run.
+const bg = JSON.parse(text(await eC.callTool({ name: "sh_run", arguments: { command: "for i in 1 2 3 4 5 6 7 8 9 10; do echo tick; sleep 1; done", cwd: ergWork, background: true } })));
+check("background run started for id-less polling", bg.status === "running" && typeof bg.id === "string");
+await new Promise((r) => setTimeout(r, 400));
+const idlessLogs = JSON.parse(text(await eC.callTool({ name: "sh_logs", arguments: {} })));
+check("sh_logs defaults to the newest live run", idlessLogs.id === bg.id && idlessLogs.status === "running");
+const idlessKill = JSON.parse(text(await eC.callTool({ name: "sh_kill", arguments: {} })));
+check("sh_kill defaults to the newest live run", idlessKill.id === bg.id && idlessKill.ok === true);
+
+// sh_checkpoint with NO label auto-numbers; sh_restore with NO label takes the newest.
+const ergCkpt = mkdtempSync(join(tmpdir(), "veil-erg-ckpt-"));
+writeFileSync(join(ergCkpt, "keep.txt"), "important\n");
+const auto1 = JSON.parse(text(await eC.callTool({ name: "sh_checkpoint", arguments: { dir: ergCkpt } })));
+check("sh_checkpoint without label auto-numbers", auto1.checkpointed === "auto-1");
+writeFileSync(join(ergCkpt, "second.txt"), "later\n");
+const auto2 = JSON.parse(text(await eC.callTool({ name: "sh_checkpoint", arguments: { dir: ergCkpt } })));
+check("sh_checkpoint auto-label does not overwrite the previous one", auto2.checkpointed === "auto-2" && list(ergCkpt).includes("auto-1"));
+rmSync(join(ergCkpt, "keep.txt")); // simulate the mistake the safety net exists for
+const autoRestore = JSON.parse(text(await eC.callTool({ name: "sh_restore", arguments: { dir: ergCkpt } })));
+check("sh_restore without label restores the newest checkpoint", autoRestore.restored === "auto-2" && existsSync(join(ergCkpt, "keep.txt")));
+const unknownLabel = JSON.parse(text(await eC.callTool({ name: "sh_restore", arguments: { label: "nope", dir: ergCkpt } })));
+check("sh_restore unknown label lists existing ones", String(unknownLabel.error).includes("auto-1") && String(unknownLabel.error).includes("auto-2"));
+rmSync(ergCkpt, { recursive: true, force: true });
+
+rmSync(ergWork, { recursive: true, force: true });
+await eC.close();
+rmSync(ergDir, { recursive: true, force: true });
 
 // ── 27) protect_secrets (TEST-PROTECT) — the BUILT-IN default denylist (~/.ssh …) ──
 // Spawn a server with a fake $HOME so defaultSecretPaths() resolves there; prove a

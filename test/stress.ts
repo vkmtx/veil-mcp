@@ -10,6 +10,7 @@ import { execSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
+import { classify } from "../src/classify.js";
 
 // Keep stress runs out of the real on-disk record store (child server inherits this).
 process.env.VEIL_STATE_DIR = mkdtempSync(join(tmpdir(), "veil-stress-state-"));
@@ -34,7 +35,10 @@ const client = new Client({ name: "stress", version: "0.0.0" });
 await client.connect(transport);
 const run = async (args: Record<string, unknown>) => J(await client.callTool({ name: "sh_run", arguments: args }));
 const detail = async (args: Record<string, unknown>) => text(await client.callTool({ name: "sh_detail", arguments: args }));
-const plan = async (command: string) => J(await client.callTool({ name: "sh_plan", arguments: { command } }));
+// The standalone sh_plan TOOL was removed in 0.8.0 (0 calls across a 30-day audit of
+// real sessions). The classifier behind it still gates every sh_run, so this battery
+// hits classify() directly — same coverage, one fewer transport in the way.
+const plan = (command: string) => classify(command);
 
 // ── A. OUTPUT EXTREMES ────────────────────────────────────────────────────────
 console.log("A. output extremes");

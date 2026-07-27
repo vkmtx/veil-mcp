@@ -183,7 +183,7 @@ export function releaseId(id: string): void {
  * sh_detail survives a server restart.
  *
  * Pass `{ persist: false }` to keep a run MEMORY-ONLY: the record is set in the
- * in-memory cache (so sh_detail/sh_history still work for the rest of THIS session)
+ * in-memory cache (so sh_detail still works for the rest of THIS session)
  * but NOTHING is written to disk — no temp file, no rename, no record file. This is
  * the per-run opt-out for a sensitive command (e.g. `env`, `cat .env`, `aws sts …`)
  * whose output would otherwise leave plaintext secrets at rest. The slot's
@@ -274,8 +274,10 @@ function evict(): void {
 
 /**
  * All known run records, newest first by `at` (then id). Reads the memory cache AND
- * every cmdN.json on disk (de-duped by id, re-caching disk hits), so sh_history sees
- * runs from earlier sessions too. Best-effort: an unreadable/absent dir just yields
+ * every cmdN.json on disk (de-duped by id, re-caching disk hits), so id resolution
+ * (runid.ts) sees runs from earlier sessions too. The newest-first order is a
+ * CONTRACT — `runid.recentIds` relies on it rather than re-sorting.
+ * Best-effort: an unreadable/absent dir just yields
  * the in-memory set. Bounded by the same VEIL_MAX_RECORDS eviction as the store.
  */
 export function all(): RunRecord[] {

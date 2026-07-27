@@ -5,6 +5,9 @@ import { z } from "zod";
 import { getLogs } from "../bgregistry.js";
 import { get } from "../store.js";
 import { condense } from "../render.js";
+import { defaultBackgroundId, noRunError, unknownIdError } from "../runid.js";
+
+const NO_RUN_HINT = "start one with sh_run background:true, then poll it with sh_logs";
 
 /**
  * Slice a durable record's stream from a byte cursor, honoring the ever-byte total so a
@@ -41,7 +44,10 @@ export function registerShLogs(server: McpServer): void {
         "A live process reads from its in-memory buffer; once it exits the SAME id resolves to the " +
         "durable record.",
       inputSchema: {
-        id: z.string().describe("The background run id returned by sh_run (e.g. cmd7)."),
+        id: z
+          .string()
+          .optional()
+          .describe("The background run id returned by sh_run (e.g. cmd7). Omit for the most recently started live run."),
         stdout_cursor: z
           .number()
           .int()
@@ -61,7 +67,12 @@ export function registerShLogs(server: McpServer): void {
         full: z.boolean().optional().describe("If true, return full output inline (skip condensing)."),
       },
     },
-    async ({ id, stdout_cursor, stderr_cursor, stream, full }) => {
+    async ({ id: requestedId, stdout_cursor, stderr_cursor, stream, full }) => {
+      // No id → the run the caller almost certainly means (newest live background run).
+      const id = requestedId ?? defaultBackgroundId();
+      if (!id) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: noRunError(NO_RUN_HINT) }) }], isError: true };
+      }
       // Live path first: an in-flight (or just-exited-still-live) handle serves an
       // incremental slice since each stream's cursor, with the new cursors + gap flag.
       const live = getLogs(id, stdout_cursor, stderr_cursor, stream);
@@ -93,7 +104,7 @@ export function registerShLogs(server: McpServer): void {
       const rec = get(id);
       if (!rec) {
         return {
-          content: [{ type: "text", text: JSON.stringify({ error: `unknown id: ${id}` }) }],
+          content: [{ type: "text", text: JSON.stringify({ error: unknownIdError(id, NO_RUN_HINT) }) }],
           isError: true,
         };
       }

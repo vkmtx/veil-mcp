@@ -371,6 +371,17 @@ export function liveHandles(): { id: string; pid: number; killTree: (sig: NodeJS
   return Array.from(registry.values()).map((h) => ({ id: h.id, pid: h.pid, killTree: h.killTree }));
 }
 
+/**
+ * Live background ids, MOST RECENTLY STARTED FIRST. Lets sh_logs/sh_kill default to
+ * "the run I just started" when the agent omits `id`, and lets an unknown id answer
+ * with the ids that ARE valid instead of a bare "unknown id".
+ */
+export function liveIds(): string[] {
+  return Array.from(registry.values())
+    .sort((a, b) => b.at - a.at)
+    .map((h) => h.id);
+}
+
 /** Number of currently-live background processes. */
 export function liveCount(): number {
   return registry.size;

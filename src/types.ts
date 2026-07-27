@@ -29,8 +29,9 @@ export interface RunRecord {
   id: string;
   command: string;
   cwd: string;
-  /** wall-clock epoch ms when the run was recorded. Enables ordering + recency
-   *  windows in sh_history (id number is NOT a recency order across servers). */
+  /** wall-clock epoch ms when the run was recorded. Orders `store.all()` newest-first,
+   *  which is what resolves an omitted `id` (id number is NOT a recency order across
+   *  servers — a restarted server continues the counter from disk). */
   at: number;
   exit: number;
   durationMs: number;
