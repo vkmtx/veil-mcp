@@ -10,7 +10,7 @@ Status legend: ✅ done · 🧪 experimental · 🔭 planned
 | effects-as-data diff (git porcelain / trace-derived) | ✅ |
 | inline assertions (`expect`) | ✅ |
 | declarative retry / timeout | ✅ |
-| dry-run plan + static classification (`sh_plan`, segment-aware) | ✅ |
+| static blast-radius classification (segment-aware) gating every `sh_run` | ✅ |
 | checkpoint / rollback | ✅ |
 | atomic CoW checkpoints (APFS `clonefile`) | ✅ |
 | real sandbox enforcement (macOS `sandbox-exec`) | ✅ |

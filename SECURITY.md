@@ -15,9 +15,10 @@ only in trusted contexts.
 
 The optional `sandbox` option provides best-effort kernel confinement (macOS
 `sandbox-exec`; Linux bubblewrap) and **refuses to run** rather than executing
-unconfined when confinement is requested but unavailable. The static `sh_plan`
-classifier is an advisory pre-check, not an enforcement boundary — never rely on it
-alone to gate a destructive command.
+unconfined when confinement is requested but unavailable. The static blast-radius
+classifier (`classify.ts`) is advisory, not an enforcement boundary — never rely on it
+alone to gate a destructive command. The same holds for the `hooks/veil-guard.sh`
+routing hook: it is fail-open and `VEIL_BYPASS=1`-able by design.
 
 ## Supported versions
 

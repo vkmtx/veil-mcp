@@ -3,6 +3,55 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
+## [0.8.0] — 2026-07-27
+
+Driven by measurement rather than design taste: a 30-day audit of real Claude Code
+session logs (3,718 transcripts / 3,554 sessions) showing what agents actually call,
+what they get wrong, and where context is really spent. `sh_run` took 3,504 calls at a
+0.2% error rate; two tools took zero. Smoke coverage grew from 456 to 479 assertions.
+
+### Removed (BREAKING)
+- **`sh_plan` and `sh_history` are gone.** Zero calls to either across the audited
+  window. Every tool costs a slot in the agent's context on *every* request, so a tool
+  nobody calls is a permanent tax paid for nothing. The blast-radius classifier
+  `sh_plan` exposed is unchanged and still gates every `sh_run` — only the standalone
+  tool is gone, and its taxonomy is now asserted directly against `classify()` in
+  `test/smoke.ts` (unit, not transport). The shipped tool surface is pinned by a test,
+  so regrowing it is a deliberate edit.
+
+### Changed
+- **Every `id` and `label` is optional now.** 5 of the 7 observed `sh_*` failures were
+  argument shape, not execution — a missing `id` on `sh_detail`/`sh_logs`/`sh_kill` or a
+  missing `label` on `sh_checkpoint`/`sh_restore`, each costing a full turn. Omitted,
+  they resolve to what you almost certainly mean: the most recent run, the newest live
+  background process, the next `auto-N`, the newest checkpoint.
+- **`sh_run` accepts `cmd` as an alias for `command`.** It was the single most common
+  wrong-key call; teaching it with an error burned a turn that accepting it does not.
+  A call carrying no command under any key still gets the corrective minimal-call message.
+- **An id or label that resolves to nothing now names the ones that do**, instead of a
+  bare `unknown id: cmdN` at the least useful possible moment.
+
+### Fixed
+- **`hooks/veil-guard.sh`: a branch named `dev` disabled the guard.** The ALLOW class
+  matched `dev|serve|watch|preview|start` *anywhere* in the command string, and ALLOW
+  short-circuits everything — so `git diff dev..feat`, or any verbose command mentioning
+  a dev branch or path, sailed straight through. Those words are anchored to a run target
+  (a package-manager script or a dev-server binary's subcommand) now; bare `--watch`
+  stays unanchored because a flag can only be a flag.
+
+### Added
+- **The hook nags on whole-diff dumps.** The audit found 133 raw-Bash results over 20k
+  characters (3.2M characters total) landing permanently in the main context, and the top
+  offenders were all full `git diff` / `git show` — which none of the package-manager
+  patterns matched. `git diff`/`show`/`log -p` now steer to `sh_run` + `sh_detail match=`,
+  because the agent nearly always wants one hunk. Diffs that are already small
+  (`--stat`, `--name-only`, `--quiet`, …) or already bounded by the caller (`| head`,
+  `| grep`, …) are untouched; `| cat` is not bounding and still nags.
+- `src/runid.ts` — shared id resolution for `sh_detail`/`sh_logs`/`sh_kill`.
+- `snapshot.latest()` / `snapshot.autoLabel()` — newest-checkpoint lookup and auto-numbering.
+- `test/smoke.ts` `check()` prints an actual-value detail on failure, so a red assertion
+  no longer needs a re-run to diagnose.
+
 ## [0.7.1] — 2026-07-17
 
 A correctness + security follow-up from a full read-only audit. Smoke coverage grew

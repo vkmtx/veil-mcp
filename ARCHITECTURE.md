@@ -10,13 +10,17 @@ agent (Claude Code)
       ▼
   server.ts ── wires tools
       │
-   ┌──┴───────────┬───────────┬────────────────────┐
-   ▼              ▼           ▼                    ▼
- sh_run       sh_detail    sh_plan        sh_checkpoint/restore/…
-   │              │           │                    │ uses
-   │ composes     │ uses      │ uses               ▼
-   ▼              ▼           ▼                  snapshot (APFS clone / rsync)
- policy(sandbox) store       classify
+   ┌──┴───────────┬────────────────────────┐
+   ▼              ▼                        ▼
+ sh_run       sh_detail/sh_logs/sh_kill  sh_checkpoint/restore/…
+   │              │                        │ uses
+   │ composes     │ uses                   ▼
+   ▼              ▼                      snapshot (APFS clone / rsync)
+ policy(sandbox) store + runid
+   │
+   │ uses
+   ▼
+ classify
    │                                  ▲
    ▼                                  │
  trace ─ exec ─ effects ─ render ─ signals
@@ -39,7 +43,8 @@ evaluate `assert`, and store the record for `sh_detail`.
 | `effects.ts`         | git porcelain before/after diff; or effects derived from a trace (skips git); `cloneDiff` (clone-vs-origin tree diff for `preview`). |
 | `render.ts`          | Token-aware condensing (head+tail+pointer); truncation-aware; CR-normalized line counting. |
 | `signals.ts`         | Content-aware extraction of FAIL/error/warn lines from the hidden middle. |
-| `store.ts`           | Addressable record store — memory cache + per-project disk persistence (survives restart), atomic id reservation, TTL prune + `VEIL_MAX_RECORDS` eviction; best-effort (degrades to memory-only). `all()` scans every record for `sh_history`. |
+| `store.ts`           | Addressable record store — memory cache + per-project disk persistence (survives restart), atomic id reservation, TTL prune + `VEIL_MAX_RECORDS` eviction; best-effort (degrades to memory-only). `all()` scans every record (used by `runid.ts`). |
+| `runid.ts`           | Resolves an omitted or wrong `id` for `sh_detail`/`sh_logs`/`sh_kill` — defaults to the obvious run, and names the addressable ids when one doesn't resolve. |
 | `init.ts`            | `veil init` — idempotent per-project `CLAUDE.md` nudge writer + setup steps. |
 | `assert.ts`          | Post-condition evaluator (`expect`).                        |
 | `classify.ts`        | Static command classification (blast radius + mutations); top-level pipeline/list decomposed per-segment, worst case aggregated. |
@@ -47,10 +52,8 @@ evaluate `assert`, and store the record for `sh_detail`.
 | `trace.ts`           | Structured syscall/FS trace (Linux strace) + read/write summarizer. |
 | `snapshot.ts`        | Checkpoint/restore — APFS CoW clone (`cp -c`) or rsync mirror; origin-dir guard. `cloneForPreview` makes a full disposable clone for `preview` runs. |
 | `tools/sh_run.ts`    | Compose exec+effects+render+store+assert+retry; read-confine + preview wiring. |
-| `tools/sh_detail.ts` | Pull stored slices by id.                                   |
-| `tools/sh_plan.ts`   | Static safety pre-check via `classify`, no execution.       |
-| `tools/sh_snapshot.ts` | `sh_checkpoint` / `sh_restore` / `sh_checkpoints`.        |
-| `tools/sh_history.ts` | Descriptive aggregates over past runs (observed, with `n` + recency window). |
+| `tools/sh_detail.ts` | Pull stored slices by id (id optional — defaults to the most recent run). |
+| `tools/sh_snapshot.ts` | `sh_checkpoint` / `sh_restore` / `sh_checkpoints` (label optional both ways). |
 | `server.ts`/`index.ts` | Build + boot over stdio; `index.ts` also dispatches `veil init`. |
 
 ## Feature → module map
@@ -66,12 +69,12 @@ evaluate `assert`, and store the record for `sh_detail`.
 | timeout + output cap (safety)   | done   | `exec.ts`, `config.ts`         |
 | **inline assertions**           | done   | `assert.ts` + `sh_run` `expect` |
 | **declarative retry/timeout**   | done   | `exec.ts` `runWithRetry` + `sh_run` |
-| **dry-run plan / static classification** static safety pre-check + blast-radius (segment-aware; not an execution dry-run) | done | `classify.ts` (`splitSegments`/`aggregate`/`classifyAtom`) + `tools/sh_plan.ts` |
+| **static classification** blast-radius (segment-aware; not an execution dry-run), gating every `sh_run` | done | `classify.ts` (`splitSegments`/`aggregate`/`classifyAtom`) — asserted directly in `test/smoke.ts` §12/§18 since the standalone `sh_plan` tool was removed in 0.8.0 |
 | **checkpoint / rollback**       | done   | `snapshot.ts` (APFS clone / rsync fallback) + `tools/sh_snapshot.ts` |
 | **sandbox enforcement**         | done (macOS) | `policy.ts` (sandbox-exec SBPL) + `sh_run` `sandbox` |
 | **secret read-confine**         | done (macOS; Linux via `--tmpfs`) | `policy.ts` (`denyRead` → `deny file-read*` / `--tmpfs`) + `sh_run` `sandbox.protect_secrets`/`deny_read` |
 | **dry-run preview** (CoW clone, real cwd untouched) | done | `snapshot.ts` `cloneForPreview` + `effects.ts` `cloneDiff` + `sh_run` `preview` |
-| **run history**                 | done | `store.ts` `all()` + `tools/sh_history.ts` (+ `at` timestamp on `RunRecord`) |
+| **argument ergonomics** optional `id`/`label` defaulting to the obvious target; `cmd` alias for `command`; wrong id/label answers with the valid ones | done | `runid.ts` + `snapshot.ts` (`latest`/`autoLabel`) + the four tools |
 | **atomic CoW checkpoints**      | done (macOS) | `snapshot.ts` APFS `clonefile` (`cp -c`) + rsync fallback |
 | **Linux sandbox backend**       | experimental | `policy.ts` `buildBwrapArgs` (bubblewrap); arg-builder unit-tested, live write-confine covered by a Linux CI test (`test/smoke.ts`, Ubuntu leg) |
 | **namespace-free Linux sandbox** (Landlock) | experimental | `policy.ts` `buildLandrunArgs` + `hasLandlock` (via `landrun`, kernel 5.13+); covers containers/CI without user namespaces. Write-confine only — refuses network-deny / read-confine. Arg-builder unit-tested; fail-closed self-test |
