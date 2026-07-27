@@ -4,6 +4,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { get } from "../store.js";
 import { compileSafe } from "../saferegex.js";
+import { defaultRunId, noRunError, unknownIdError } from "../runid.js";
+
+const NO_RUN_HINT = "no sh_run has been recorded in this store yet";
 
 export function registerShDetail(server: McpServer): void {
   server.registerTool(
@@ -14,7 +17,10 @@ export function registerShDetail(server: McpServer): void {
         "Retrieve full stored output for a previous sh_run by id WITHOUT re-running it " +
         "(the addressable output store). Use after a condensed result hid lines you need.",
       inputSchema: {
-        id: z.string().describe("The run id returned by sh_run (e.g. cmd3)."),
+        id: z
+          .string()
+          .optional()
+          .describe("The run id returned by sh_run (e.g. cmd3). Omit for the most recent run."),
         selector: z
           .enum(["stdout", "stderr", "full", "meta", "trace"])
           .default("full")
@@ -28,11 +34,17 @@ export function registerShDetail(server: McpServer): void {
           ),
       },
     },
-    async ({ id, selector, match }) => {
+    async ({ id: requestedId, selector, match }) => {
+      // No id → the most recent run. "Show me what that last command actually printed"
+      // is the dominant call, and it should not fail schema validation for want of an id.
+      const id = requestedId ?? defaultRunId();
+      if (!id) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: noRunError(NO_RUN_HINT) }) }], isError: true };
+      }
       const rec = get(id);
       if (!rec) {
         return {
-          content: [{ type: "text", text: JSON.stringify({ error: `unknown id: ${id}` }) }],
+          content: [{ type: "text", text: JSON.stringify({ error: unknownIdError(id, NO_RUN_HINT) }) }],
           isError: true,
         };
       }

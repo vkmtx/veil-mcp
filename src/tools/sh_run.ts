@@ -118,18 +118,17 @@ export function registerShRun(server: McpServer): void {
         "Pass scrub_env:true to strip credential-shaped env vars from the child (auto-on " +
         "with sandbox protect_secrets/deny_read); no_store:true keeps a sensitive run memory-only.",
       inputSchema: {
-        // Corrective -32602: when `command` is missing (sent under a wrong key —
-        // the SDK validates BEFORE the handler and zod strips unknown keys, so a
-        // handler-side normalizer can never see it), teach the minimal call shape
-        // in-band instead of dumping the raw zod error.
-        command: z
-          .string({
-            error: (iss) =>
-              iss.input === undefined
-                ? 'missing required "command" (string). Minimal call: {"command":"<shell command>"}. Optional: expect, cwd, sandbox, timeout_ms, retries, background via `&` is NOT supported — use Bash for dev servers/TTY.'
-                : undefined,
-          })
-          .describe("The shell command to execute."),
+        // `command` is optional in the SCHEMA but required in the HANDLER: the wrong-key
+        // call `{cmd:"…"}` was the single most common way this tool failed, and a schema
+        // that only rejects it burns a turn to teach what the handler could simply accept.
+        // Declaring `cmd` makes the alias survive zod's unknown-key stripping (the SDK
+        // validates before the handler, so a handler-side normalizer never sees a key the
+        // schema didn't declare). Neither key present → the corrective error below.
+        command: z.string().optional().describe("The shell command to execute."),
+        cmd: z
+          .string()
+          .optional()
+          .describe("Alias for `command`, accepted so a wrong-key call still runs. Prefer `command`."),
         cwd: z.string().optional().describe("Working directory. Defaults to the server's cwd."),
         full: z
           .boolean()
@@ -218,7 +217,25 @@ export function registerShRun(server: McpServer): void {
           ),
       },
     },
-    async ({ command, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview, scrub_env, no_store, background }) => {
+    async ({ command: commandArg, cmd, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview, scrub_env, no_store, background }) => {
+      // Accept the `cmd` alias, but keep the corrective message for a call that carries
+      // no command at all — it teaches the minimal call shape in-band instead of leaving
+      // the caller to guess from a zod dump.
+      const command = commandArg ?? cmd;
+      if (command === undefined) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                error:
+                  'missing required "command" (string). Minimal call: {"command":"<shell command>"}. Optional: expect, cwd, sandbox, timeout_ms, retries, background. A trailing `&` is NOT supported — pass background:true, or use Bash for TTY work.',
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
       const origin = cwd ?? process.cwd();
       let workdir = origin;
 
