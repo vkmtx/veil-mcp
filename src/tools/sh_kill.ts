@@ -4,9 +4,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { kill } from "../bgregistry.js";
 import { get } from "../store.js";
-import { defaultBackgroundId, noRunError, unknownIdError } from "../runid.js";
+import { defaultKillId, noRunError, unknownIdError } from "../runid.js";
 
 const NO_RUN_HINT = "nothing was started with sh_run background:true in this session";
+const NOTHING_LIVE = "no background run is live — nothing to stop";
 
 export function registerShKill(server: McpServer): void {
   server.registerTool(
@@ -32,11 +33,13 @@ export function registerShKill(server: McpServer): void {
       },
     },
     async ({ id: requestedId, signal }) => {
-      // No id → the newest live background run. Killing "the dev server I just started"
+      // No id → the newest LIVE background run. Killing "the dev server I just started"
       // is the overwhelmingly common call and shouldn't require threading its id through.
-      const id = requestedId ?? defaultBackgroundId();
+      // Live-only on purpose: defaulting to a finished run would answer a bare sh_kill
+      // with already_exited for something unrelated, which reads as success.
+      const id = requestedId ?? defaultKillId();
       if (!id) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: noRunError(NO_RUN_HINT) }) }], isError: true };
+        return { content: [{ type: "text", text: JSON.stringify({ error: noRunError(NOTHING_LIVE) }) }], isError: true };
       }
       const res = kill(id, signal);
       if (res.status === "terminating") {

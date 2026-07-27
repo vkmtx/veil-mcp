@@ -209,9 +209,12 @@ fi
 #   summary flags  — --stat/--numstat/--shortstat/--name-only/--name-status/--quiet/
 #                    --exit-code/--compact-summary
 #   bounding pipes — | head / tail / wc / grep / rg / sed / awk / cut / sort / uniq
+#   plumbing       — the subcommand is anchored with ([[:space:]]|$), NOT \b, because `\b`
+#                    matches before a hyphen: `git show-ref`, `git diff-tree`,
+#                    `git diff-index` are small-output plumbing and must not nag.
 # `| cat` is NOT bounding (it was the single most common dump idiom) and still nags.
 if [ -z "$NAG" ] &&
-   printf '%s' "$CMD" | grep -Eq "${EXPFX}git([[:space:]]+-C[[:space:]]+[^|;&[:space:]]+)?[[:space:]]+(diff|show)\b|${EXPFX}git[^|;&]*[[:space:]]+log\b[^|;&]*[[:space:]](-p|--patch)\b" &&
+   printf '%s' "$CMD" | grep -Eq "${EXPFX}git([[:space:]]+-C[[:space:]]+[^|;&[:space:]]+)?[[:space:]]+(diff|show)([[:space:]]|$)|${EXPFX}git[^|;&]*[[:space:]]+log[^|;&]*[[:space:]](-p|--patch)([[:space:]]|$)" &&
    ! printf '%s' "$CMD" | grep -Eq -e '--(stat|numstat|shortstat|name-only|name-status|quiet|exit-code|compact-summary)\b' \
      -e '\|[[:space:]]*(head|tail|wc|grep|rg|sed|awk|cut|sort|uniq)\b'; then
   NAG='veil: whole-diff dump — retry EXACTLY as sh_run {"command":"<this same command string>"}, then pull just the hunk you need with sh_detail {"id":"<id>","selector":"stdout","match":"<regex>"}. A full diff is usually thousands of tokens of which you read ten lines. Use --stat/--name-only if you only need the file list. Prefix VEIL_BYPASS=1 to force Bash.'
