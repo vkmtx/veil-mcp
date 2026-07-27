@@ -327,6 +327,11 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   for (const cmd of ["git diff --stat", "git diff --name-only dev..feat", "git diff --numstat", "git diff --quiet || echo dirty", "git diff | head -40", 'git diff dev..feat | grep -c "^+"', "git log --oneline -10"]) {
     check(`guard: allows bounded diff ${cmd}`, guardExit(cmd) === 0);
   }
+  // The subcommand is anchored with ([[:space:]]|$), not \b — `\b` matches before a
+  // hyphen, which would have swept in small-output plumbing.
+  for (const cmd of ["git show-ref --verify refs/heads/main", "git diff-tree -r HEAD", "git diff-index HEAD", "git difftool --tool-help"]) {
+    check(`guard: allows git plumbing ${cmd}`, guardExit(cmd) === 0);
+  }
   // ALLOW anchoring (0.8.0 bug): dev/serve/watch/preview/start used to match ANYWHERE in
   // the string, and ALLOW short-circuits the whole guard — so a branch or path named `dev`
   // silently disabled the guard for that command. They are anchored to a run target now.
@@ -1100,6 +1105,15 @@ const idlessLogs = JSON.parse(text(await eC.callTool({ name: "sh_logs", argument
 check("sh_logs defaults to the newest live run", idlessLogs.id === bg.id && idlessLogs.status === "running");
 const idlessKill = JSON.parse(text(await eC.callTool({ name: "sh_kill", arguments: {} })));
 check("sh_kill defaults to the newest live run", idlessKill.id === bg.id && idlessKill.ok === true);
+// ...and with nothing live it says so, instead of resolving to a finished run and
+// answering already_exited — a success shape for a call that stopped nothing.
+await new Promise((r) => setTimeout(r, 600));
+const killNothing = JSON.parse(text(await eC.callTool({ name: "sh_kill", arguments: {} })));
+check("sh_kill with nothing live reports nothing to stop", String(killNothing.error).includes("nothing to stop") && killNothing.status === undefined);
+// sh_detail's default never resolves to a live-but-unrecorded id (it would name an id
+// and then deny it) — the aliased foreground run is still the answer.
+const detailAfterBg = JSON.parse(text(await eC.callTool({ name: "sh_detail", arguments: { selector: "meta" } })));
+check("sh_detail default prefers a run it can actually serve", typeof detailAfterBg.id === "string" && detailAfterBg.error === undefined);
 
 // sh_checkpoint with NO label auto-numbers; sh_restore with NO label takes the newest.
 const ergCkpt = mkdtempSync(join(tmpdir(), "veil-erg-ckpt-"));

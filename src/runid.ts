@@ -23,20 +23,31 @@ export function recentIds(limit = 8): string[] {
 }
 
 /**
- * Default target for sh_detail: the most recent run of any kind. A live background run
- * has no durable record yet, so fall back to the newest live id.
+ * Default target for sh_detail: the most recent STORED run. Deliberately does not fall
+ * back to a live background id — a live run has no durable record yet, so defaulting to
+ * one would resolve to an id that sh_detail then reports as unknown. Better to say "no
+ * run recorded" than to name an id and deny it in the same breath.
  */
 export function defaultRunId(): string | undefined {
-  return recentIds(1)[0] ?? liveIds()[0];
+  return recentIds(1)[0];
 }
 
 /**
- * Default target for sh_logs / sh_kill: the most recently started LIVE background run —
- * the one the agent almost certainly means. With nothing live, fall back to the newest
- * stored record so a poll just after exit still resolves.
+ * Default target for sh_logs: the most recently started LIVE background run — the one the
+ * agent almost certainly means. Falls back to the newest stored record so a poll landing
+ * just after the live→durable handoff still resolves.
  */
-export function defaultBackgroundId(): string | undefined {
+export function defaultLogsId(): string | undefined {
   return liveIds()[0] ?? recentIds(1)[0];
+}
+
+/**
+ * Default target for sh_kill: the newest LIVE run and nothing else. Falling back to a
+ * stored record would answer a bare `sh_kill` with `already_exited` for some unrelated
+ * finished command — a success-shaped reply to a call that stopped nothing.
+ */
+export function defaultKillId(): string | undefined {
+  return liveIds()[0];
 }
 
 /**

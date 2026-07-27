@@ -5,7 +5,7 @@ import { z } from "zod";
 import { getLogs } from "../bgregistry.js";
 import { get } from "../store.js";
 import { condense } from "../render.js";
-import { defaultBackgroundId, noRunError, unknownIdError } from "../runid.js";
+import { defaultLogsId, noRunError, unknownIdError } from "../runid.js";
 
 const NO_RUN_HINT = "start one with sh_run background:true, then poll it with sh_logs";
 
@@ -69,7 +69,7 @@ export function registerShLogs(server: McpServer): void {
     },
     async ({ id: requestedId, stdout_cursor, stderr_cursor, stream, full }) => {
       // No id → the run the caller almost certainly means (newest live background run).
-      const id = requestedId ?? defaultBackgroundId();
+      const id = requestedId ?? defaultLogsId();
       if (!id) {
         return { content: [{ type: "text", text: JSON.stringify({ error: noRunError(NO_RUN_HINT) }) }], isError: true };
       }
