@@ -148,10 +148,36 @@ if printf '%s' "$CMD" | grep -Eq \
   exit 2
 fi
 
+# EXECUTABLE POSITION, same idea as RMPFX: a tool name only counts when it is what the
+# shell RUNS. An unanchored `\b(make|tsc|vitest|…)\b` matched the word anywhere and blocked
+# read-only greps (`grep -rn "HttpApiGroup.make" src`) and package.json lookups. EXPFX adds
+# the runner chain (incl. `npx`/`bunx`/`uvx`, so `npx vitest run` still matches) plus an
+# optional path prefix, so `./node_modules/.bin/vitest` and `/usr/bin/make` still match
+# while `HttpApiGroup.make` — no anchor, no trailing slash — does not. Shared by the ALLOW
+# and VERBOSE classes below.
+EXPFX='(^|[|;&({])[[:space:]]*((sudo|doas|env|nice|nohup|command|timeout|time|stdbuf|setsid|ionice|xargs|busybox|npx|bunx|pnpx|uvx|pipx|do|then|else)[[:space:]]+((-[^|;&()[:space:]]*|[0-9][^|;&()[:space:]]*)[[:space:]]+)*)*([A-Za-z0-9._~+/-]*/)?'
+
 # ALLOW (sh_run can't help): long-running servers, watch/dev, backgrounded jobs,
 # process management, and interactive/TTY tools. sh_run blocks until exit and has no
 # TTY/background, so forcing it here would only break the flow — let these be raw Bash.
-if printf '%s' "$CMD" | grep -Eq '&[[:space:]]*$|\b(dev|serve|watch|preview|start)\b|--watch\b|\b(kill|pkill|killall|pgrep|pidof|nohup|disown)\b|\b(nodemon|concurrently|vim|vi|nano|emacs|less|more|most|top|htop|man)\b|\btail[[:space:]]+-f\b'; then
+#
+# The dev/serve/watch/preview/start words are anchored to a RUN TARGET (a package-manager
+# script name or a dev-server binary's subcommand). Unanchored `\b(dev|start|…)\b` matched
+# those words ANYWHERE in the string, and since ALLOW short-circuits the whole guard, one
+# branch named `dev` disabled it for the entire command: `git diff dev..feat` (and any
+# verbose command mentioning a dev/preview branch or path) sailed through. Bare `--watch`
+# stays unanchored — it is a flag, so it can only be one.
+if printf '%s' "$CMD" | grep -Eq \
+  -e '&[[:space:]]*$' \
+  -e '--watch\b' \
+  -e '\b(kill|pkill|killall|pgrep|pidof|nohup|disown)\b' \
+  -e '\b(nodemon|concurrently|vim|vi|nano|emacs|less|more|most|top|htop|man)\b' \
+  -e '\btail[[:space:]]+-f\b' \
+  -e "${EXPFX}(npm|pnpm|yarn|bun|deno)[[:space:]]+(run[[:space:]]+)?(dev|serve|server|start|preview|watch)\b" \
+  -e "${EXPFX}(next|vite|nuxt|astro|remix|expo|turbo|nx|parcel|webpack-dev-server|ng|rails|air)[[:space:]]+(dev|serve|server|start|preview|watch)\b" \
+  -e "${EXPFX}(make|just)[[:space:]]+(dev|serve|server|start|watch)\b" \
+  -e "${EXPFX}cargo[[:space:]]+watch\b" \
+  -e '\bmanage\.py[[:space:]]+runserver\b'; then
   exit 0
 fi
 
@@ -159,23 +185,42 @@ fi
 # Modern tools (bun/deno/uv) and image builds (docker build / compose build) are just as
 # verbose as npm/pip. Note `docker ps|logs|run` and `docker compose up` are NOT matched here
 # — they are read-only or long-running and fall through to the allow path / raw Bash.
-# EXECUTABLE POSITION, same as RMPFX: the tool name must be what the shell RUNS. An
-# unanchored `\b(make|tsc|vitest|…)\b` matched the word anywhere and blocked read-only
-# greps (`grep -rn "HttpApiGroup.make" src`) and package.json lookups. EXPFX adds the
-# runner chain (incl. `npx`/`bunx`/`uvx`, so `npx vitest run` still blocks) plus an
-# optional path prefix, so `./node_modules/.bin/vitest` and `/usr/bin/make` still match
-# while `HttpApiGroup.make` — no anchor, no trailing slash — does not.
+# Tool names are anchored to EXECUTABLE POSITION via EXPFX (defined above the ALLOW class).
 # ONE NAG PER SESSION: after the first block the model has been told; further verbose
 # commands in the same session are allowed (the CLAUDE.md soft preference still applies).
-EXPFX='(^|[|;&({])[[:space:]]*((sudo|doas|env|nice|nohup|command|timeout|time|stdbuf|setsid|ionice|xargs|busybox|npx|bunx|pnpx|uvx|pipx|do|then|else)[[:space:]]+((-[^|;&()[:space:]]*|[0-9][^|;&()[:space:]]*)[[:space:]]+)*)*([A-Za-z0-9._~+/-]*/)?'
+# The marker is shared with the whole-diff class below — one nag total, not one per class.
 MARK="${TMPDIR:-/tmp}/veil-guard-verbose-$SID"
+VERBOSE_MSG='veil: verbose command (one nag per session) — retry EXACTLY as sh_run {"command":"<this same command string>","expect":{"exit":0}}. The only required key is "command" (a string; NOT cmd). Full output later via sh_detail. Prefix VEIL_BYPASS=1 to force Bash.'
+NAG=""
 if printf '%s' "$CMD" | grep -Eq \
   -e "${EXPFX}(npm|pnpm|yarn|bun|deno|uv|pip|pip3|cargo|go|gradle|mvn|bundle|composer|gem)\b[^|;&]*\b(install|i|ci|add|build|test|run|sync)\b" \
   -e "${EXPFX}(make|tsc|webpack|vite|rollup|esbuild|pytest|jest|vitest|mocha)\b" \
   -e "${EXPFX}docker(-compose|[[:space:]]+compose)?[[:space:]]+(build|buildx)\b"; then
+  NAG="$VERBOSE_MSG"
+fi
+
+# WHOLE-DIFF DUMPS — the largest UNCOVERED source of context bloat. A 30-day audit of
+# real Claude Code sessions found 133 raw-Bash results over 20k chars (3.2M chars total)
+# and the top offenders were all `git diff dev..branch | cat`, `git diff --cached`,
+# `git show <sha>` — none of which the package-manager patterns above match. Unlike a
+# build log the agent usually wants ONE hunk, which is exactly sh_detail match=.
+#
+# Deliberately NOT matched (already small, or already bounded by the caller):
+#   summary flags  — --stat/--numstat/--shortstat/--name-only/--name-status/--quiet/
+#                    --exit-code/--compact-summary
+#   bounding pipes — | head / tail / wc / grep / rg / sed / awk / cut / sort / uniq
+# `| cat` is NOT bounding (it was the single most common dump idiom) and still nags.
+if [ -z "$NAG" ] &&
+   printf '%s' "$CMD" | grep -Eq "${EXPFX}git([[:space:]]+-C[[:space:]]+[^|;&[:space:]]+)?[[:space:]]+(diff|show)\b|${EXPFX}git[^|;&]*[[:space:]]+log\b[^|;&]*[[:space:]](-p|--patch)\b" &&
+   ! printf '%s' "$CMD" | grep -Eq -e '--(stat|numstat|shortstat|name-only|name-status|quiet|exit-code|compact-summary)\b' \
+     -e '\|[[:space:]]*(head|tail|wc|grep|rg|sed|awk|cut|sort|uniq)\b'; then
+  NAG='veil: whole-diff dump — retry EXACTLY as sh_run {"command":"<this same command string>"}, then pull just the hunk you need with sh_detail {"id":"<id>","selector":"stdout","match":"<regex>"}. A full diff is usually thousands of tokens of which you read ten lines. Use --stat/--name-only if you only need the file list. Prefix VEIL_BYPASS=1 to force Bash.'
+fi
+
+if [ -n "$NAG" ]; then
   [ -e "$MARK" ] && exit 0           # already nagged this session — respect the model's choice
   : > "$MARK" 2>/dev/null || true    # marker write failure = still nag (fail toward nudge, never toward block-loop)
-  echo 'veil: verbose command (one nag per session) — retry EXACTLY as sh_run {"command":"<this same command string>","expect":{"exit":0}}. The only required key is "command" (a string; NOT cmd). Full output later via sh_detail. Prefix VEIL_BYPASS=1 to force Bash.' >&2
+  echo "$NAG" >&2
   exit 2
 fi
 
