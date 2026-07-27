@@ -24,9 +24,10 @@ When the \`veil\` MCP server is connected, prefer its tools over raw Bash:
   quiet structured result and stores full output addressably.
   - Add **\`expect\`** to verify in the same call (e.g. \`{ exit: 0, file_exists: "dist/index.js" }\`).
   - Add **\`sandbox: true\`** to confine a risky command (opt-in; macOS solid, Linux experimental).
-- **\`sh_detail id=<id>\`** to recover output a condensed result hid — never re-run a command to see it again.
-- **\`sh_plan\`** for a static safety pre-check before a destructive command.
-- **\`sh_checkpoint\`** / **\`sh_restore\`** to snapshot and roll back a risky change.
+- **\`sh_detail\`** to recover output a condensed result hid — never re-run a command to see it again.
+  Omit \`id\` for the last run; add \`match=<regex>\` to pull only the lines you need.
+- **\`sh_checkpoint\`** / **\`sh_restore\`** to snapshot and roll back a risky change
+  (\`label\` is optional: checkpoints auto-number, restore takes the newest).
 
 Use raw Bash only for trivial read-only or interactive/TTY commands.
 ${MARK_END}`;

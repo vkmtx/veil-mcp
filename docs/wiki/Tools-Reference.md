@@ -3,13 +3,23 @@
 | Tool | Purpose |
 |------|---------|
 | `sh_run` | Run a command → quiet structured result; full output stored, not re-emitted. `background: true` starts a long-running process |
-| `sh_detail` | Pull stored `stdout`/`stderr`/`meta`/`trace` for a past run by id (no re-run; survives restarts) |
+| `sh_detail` | Pull stored `stdout`/`stderr`/`meta`/`trace` for a past run (no re-run; survives restarts) |
 | `sh_logs` | Poll a background run's output incrementally by byte cursor, plus its status |
 | `sh_kill` | Signal a background run's process group (stop a dev server / watch) |
-| `sh_plan` | Static safety pre-check of a command's blast radius (no execution) |
 | `sh_checkpoint` | Snapshot a directory under a label (CoW clone / rsync) |
 | `sh_restore` | Restore a directory from a checkpoint |
 | `sh_checkpoints` | List checkpoint labels for a project directory |
+
+`id` (on `sh_detail`/`sh_logs`/`sh_kill`) and `label` (on `sh_checkpoint`/`sh_restore`)
+are **optional**. Omitted, they resolve to the run or checkpoint you almost certainly
+mean — the most recent run, the newest live background process, the next `auto-N`, the
+newest checkpoint. A value that resolves to nothing answers with the ones that do.
+`sh_run` also accepts `cmd` as an alias for `command`.
+
+> **Removed in 0.8.0:** `sh_plan` and `sh_history`. A 30-day audit of real Claude Code
+> sessions measured 0 calls to either across 3.5k sessions while `sh_run` took 3.5k, and
+> every tool costs a slot in the agent's context on every request. The blast-radius
+> classifier `sh_plan` exposed is unchanged and still gates every `sh_run`.
 
 ## `sh_run`
 
@@ -92,25 +102,25 @@ sh_kill { "id": "cmd7", "signal": "SIGTERM" }               // stop it (idempote
   background dev server is never orphaned. `VEIL_MAX_BG_PROCS` (default 16) caps how many
   may run at once.
 
-## `sh_plan`
+## Blast-radius classification
 
-A **static safety pre-check**, not an execution dry-run. Predicts a command's category
-(`read-only` / `mutating` / `destructive` / `network` / `complex` / `unknown`),
-reversibility, and file effects without running it.
+Every `sh_run` is classified before it executes: category (`read-only` / `mutating` /
+`destructive` / `network` / `complex` / `unknown`), reversibility, and predicted file
+effects. A top-level pipeline/list (`a && b`, `c | d`) is decomposed and classified
+per-segment, worst case wins; substitution/redirect/glob are undecidable and stay
+`complex`. Errors bias toward over-flagging, never under.
 
-A top-level pipeline/list (`a && b`, `c | d`) is decomposed and classified per-segment,
-worst case wins; substitution/redirect/glob are undecidable and stay `complex`. Errors
-bias toward over-flagging, never under.
-
-```jsonc
-sh_plan { "command": "git push --force" }   // → { category: "destructive", warning: "…" }
-```
+This is **static** analysis and advisory only — it is not an enforcement boundary and not
+an execution dry-run. For the latter, use `sh_run` with `preview: true` (runs in a
+disposable CoW clone) or `sandbox: true` (real kernel confinement).
 
 ## Checkpoints
 
 ```jsonc
 sh_checkpoint { "label": "pre-refactor" }     // CoW clone (APFS) or rsync mirror
 sh_restore   { "label": "pre-refactor" }      // undo; refuses a target dir != origin
+sh_checkpoint {}                              // no label → auto-1, auto-2, …
+sh_restore   {}                               // no label → the newest checkpoint
 sh_checkpoints {}                             // list labels for the current project
 ```
 

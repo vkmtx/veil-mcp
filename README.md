@@ -70,22 +70,22 @@ touches only `CLAUDE.md` — see [Adoption](#adoption).
 | Tool | What it does |
 |------|--------------|
 | **`sh_run`** | Run a command → quiet structured result: exit, duration, files changed, token-aware stdout/stderr. `background: true` starts a long-running process (dev server, `--watch`) and returns `{ id, pid, status: "running" }` immediately instead of blocking. The workhorse. |
-| **`sh_logs`** | Poll a background run's output by id — incremental, per-stream byte cursor (`stdout_cursor`/`stderr_cursor`), plus status/exit/signal. Never re-dumps what was already tailed. |
-| **`sh_kill`** | Stop a background run by id. Signals the whole process group; SIGTERM escalates to SIGKILL after 2s. Killing an already-exited id is idempotent. |
-| **`sh_detail`** | Pull the full stored output of a past run by id — no re-run. Disk-backed, so it survives a server restart. `match=<regex>` greps the stored stream for a value condensing hid. |
-| **`sh_plan`** | Predict a command's blast radius (read-only → destructive) **without running it**. |
-| **`sh_checkpoint` / `sh_restore`** | Snapshot a directory and roll back. Owner-only (`0700`) storage, published atomically. Restore refuses a target dir different from where the checkpoint was taken. |
+| **`sh_logs`** | Poll a background run's output — incremental, per-stream byte cursor (`stdout_cursor`/`stderr_cursor`), plus status/exit/signal. Never re-dumps what was already tailed. Omit `id` for the newest live run. |
+| **`sh_kill`** | Stop a background run. Signals the whole process group; SIGTERM escalates to SIGKILL after 2s. Killing an already-exited id is idempotent. Omit `id` for the newest live run. |
+| **`sh_detail`** | Pull the full stored output of a past run — no re-run. Disk-backed, so it survives a server restart. `match=<regex>` greps the stored stream for a value condensing hid. Omit `id` for the most recent run. |
+| **`sh_checkpoint` / `sh_restore`** | Snapshot a directory and roll back. Owner-only (`0700`) storage, published atomically. Restore refuses a target dir different from where the checkpoint was taken. Omit `label` to auto-number the checkpoint / restore the newest. |
 | **`sh_checkpoints`** | List checkpoint labels. |
-| **`sh_history`** | Descriptive aggregates over past runs of a command — observed exit / retry / duration `p50`/`p90` / file-churn, with explicit `n` and recency window. Not a prediction, no causation. |
+
+Every `id`/`label` is optional and defaults to the run or checkpoint you almost certainly
+mean; a wrong one answers with the values that *are* addressable. `sh_run` also accepts
+`cmd` as an alias for `command`. These are not conveniences — a 30-day audit of real agent
+sessions found argument shape, not execution, behind most failed calls.
 
 ## See it
 
 ```jsonc
 // build AND verify the artifact exists — one call, no follow-up ls
 sh_run { "command": "npm run build", "expect": { "exit": 0, "file_exists": "dist/index.js" } }
-
-// check blast radius before running (git is classified per-subcommand)
-sh_plan { "command": "git push --force" }            // → { category: "destructive", … }
 
 // confine a risky script to cwd, deny network, block reads of secret dirs
 sh_run { "command": "./untrusted.sh", "sandbox": { "network": false, "protect_secrets": true } }
@@ -96,12 +96,9 @@ sh_run { "command": "rm -rf build && npm run generate", "preview": true }
 // start a dev server detached, tail its output incrementally, stop it when done
 sh_run  { "command": "npm run dev", "background": true }         // → { id: "cmd12", pid, status: "running" }
 sh_logs { "id": "cmd12", "stdout_cursor": 0 }                     // poll again with the returned cursor for only NEW output
-sh_kill { "id": "cmd12" }                                         // → { status: "terminating" }, settles to exited/killed
+sh_kill { }                                                       // no id = the newest live run → { status: "terminating" }
 
-// is this command historically slow/flaky here? (descriptive, not a prediction)
-sh_history { "command": "npm test" }
-
-// undo a refactor
+// undo a refactor — label optional both ways (auto-N, then newest-first)
 sh_checkpoint { "label": "pre-refactor" }
 sh_restore   { "label": "pre-refactor" }
 
@@ -273,11 +270,12 @@ strace), so the Linux-only sandbox and trace paths are exercised too.
 |---|---------|--------|
 | **I / J / H** | token-aware output · addressable detail (`sh_detail`, `match`) · effect diff | ✅ done |
 | **G / M** | inline assertions (`expect`) · declarative retry/timeout | ✅ done |
-| **B / K-lite** | static safety pre-check + classification (`sh_plan`) | ✅ done |
+| **B / K-lite** | blast-radius classification (read-only → destructive) gating every `sh_run` | ✅ done |
 | **C / C+** | checkpoint / rollback · atomic CoW clone (same-volume APFS; cross-volume falls back to rsync, reported honestly) | ✅ done |
 | **K** | real sandbox (macOS `sandbox-exec`) | ✅ done |
 | **J+** | disk-backed record store (survives restart, TTL-pruned) | ✅ done |
-| **K-read / P / HIST** | secret read-confine (`sandbox.protect_secrets`) · dry-run `preview` (CoW clone, real cwd untouched) · descriptive `sh_history` | ✅ done |
+| **K-read / P** | secret read-confine (`sandbox.protect_secrets`) · dry-run `preview` (CoW clone, real cwd untouched) | ✅ done |
+| — | tool surface pruned to what agents actually call (`sh_plan`, `sh_history` removed in 0.8.0 — 0 calls across a 30-day audit of 3.5k real sessions) | ✅ done |
 | **K+ / A** | Linux sandbox (bubblewrap) · structured trace (`strace`) | 🧪 experimental — validated on Linux CI |
 | **K++** | namespace-free Linux sandbox (Landlock via `landrun`) — write-confine in containers/Codespaces where bwrap can't | 🧪 experimental — arg-builder unit-tested |
 | — | background / long-running processes (`background: true`, `sh_logs`, `sh_kill`) for dev servers / watchers | ✅ done |

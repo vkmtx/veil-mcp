@@ -12,12 +12,20 @@ It doesn't, by default — adoption depends on a nudge (`veil init` writes one i
 `CLAUDE.md`) or the guard hook. There is no native integration; `veil init` reduces
 setup to one command but doesn't remove the step. See [[Installation]].
 
-### Is `sh_plan` a real dry-run?
+### Where did `sh_plan` and `sh_history` go?
+
+Removed in 0.8.0. A 30-day audit of real Claude Code session logs measured **0 calls** to
+either across 3.5k sessions, against 3.5k calls to `sh_run`. Every tool occupies a slot in
+the agent's context on every single request, so a tool nobody calls is a permanent tax.
+The blast-radius classifier behind `sh_plan` is unchanged and still gates every `sh_run`.
+
+### Is the blast-radius classification a real dry-run?
 
 No — it's **static** classification, not execution. Shell is Turing-complete, so a
-genuine universal dry-run is impossible (`curl | sh` can't be predicted). `sh_plan`
-decomposes pipelines/lists and classifies each segment, biasing toward over-flagging.
-Treat it as an advisory pre-check, never as an enforcement boundary.
+genuine universal dry-run is impossible (`curl | sh` can't be predicted). It decomposes
+pipelines/lists and classifies each segment, biasing toward over-flagging. Treat it as
+advisory, never as an enforcement boundary. For an actual dry-run use `sh_run` with
+`preview: true`; for containment use `sandbox: true`.
 
 ### Will I lose `sh_detail` history if the server restarts?
 

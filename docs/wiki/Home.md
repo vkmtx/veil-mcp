@@ -25,7 +25,7 @@ structure and safety stay valuable even as context windows grow.
 ## Pages
 
 - **[[Installation]]** — npm, GitHub, from source, agent config
-- **[[Tools Reference]]** — `sh_run`, `sh_detail`, `sh_plan`, checkpoints
+- **[[Tools Reference]]** — `sh_run`, `sh_detail`, `sh_logs`/`sh_kill`, checkpoints
 - **[[Configuration]]** — every `VEIL_*` environment variable
 - **[[Sandbox and Trace]]** — kernel confinement (sandbox enforcement) and FS tracing (structured syscall trace)
 - **[[FAQ]]** — common questions and honest limits
