@@ -77,9 +77,13 @@ touches only `CLAUDE.md` — see [Adoption](#adoption).
 | **`sh_checkpoints`** | List checkpoint labels. |
 
 Every `id`/`label` is optional and defaults to the run or checkpoint you almost certainly
-mean; a wrong one answers with the values that *are* addressable. `sh_run` also accepts
-`cmd` as an alias for `command`. These are not conveniences — a 30-day audit of real agent
-sessions found argument shape, not execution, behind most failed calls.
+mean; a wrong one answers with the values that *are* addressable. `sh_run` also accepts the
+keys the caller's own Bash tool uses: `cmd` (→ `command`), `timeout` (→ `timeout_ms`, in
+milliseconds, string or number), `run_in_background` (→ `background`), and `description`
+(accepted, ignored). These are not conveniences — a 30-day audit of real agent sessions
+found argument shape, not execution, behind most failed calls, and an undeclared key is
+*silently dropped* before the handler runs: 131 calls asked for a timeout that was never
+applied, and 4 "background" runs blocked to completion instead.
 
 ## See it
 

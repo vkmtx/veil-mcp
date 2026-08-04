@@ -191,8 +191,23 @@ fi
 # The marker is shared with the whole-diff class below — one nag total, not one per class.
 MARK="${TMPDIR:-/tmp}/veil-guard-verbose-$SID"
 VERBOSE_MSG='veil: verbose command (one nag per session) — retry EXACTLY as sh_run {"command":"<this same command string>","expect":{"exit":0}}. The only required key is "command" (a string; NOT cmd). Full output later via sh_detail. Prefix VEIL_BYPASS=1 to force Bash.'
+
+# BOUNDING PIPE — the caller already limited the output themselves, so the whole
+# premise of the block (sh_run condenses a wall of text) no longer holds and the
+# nag only costs a turn. The whole-diff class conceded this from the start; the
+# VERBOSE class did not, and a 7-day replay of real blocks found 3 of 18 were
+# exactly that: `npx tsc --noEmit 2>&1 | head -20`, `pnpm build 2>&1 | tail -30`,
+# `npm run test:run 2>&1 | grep -E "Tests" | tail -2`. Shared by both classes now,
+# so the two can never drift apart again. `| cat` is deliberately absent — it
+# bounds nothing and was the single most common dump idiom.
+# Scope, stated plainly: one bounding pipe anywhere exempts the WHOLE command, so
+# `npm ci | head; npm run build` escapes the nag. That over-exemption is the same
+# one the whole-diff class has always had, and this is a routing nudge, not a gate.
+BOUNDED='\|[[:space:]]*(head|tail|wc|grep|rg|sed|awk|cut|sort|uniq)\b'
+
 NAG=""
-if printf '%s' "$CMD" | grep -Eq \
+if ! printf '%s' "$CMD" | grep -Eq "$BOUNDED" &&
+   printf '%s' "$CMD" | grep -Eq \
   -e "${EXPFX}(npm|pnpm|yarn|bun|deno|uv|pip|pip3|cargo|go|gradle|mvn|bundle|composer|gem)\b[^|;&]*\b(install|i|ci|add|build|test|run|sync)\b" \
   -e "${EXPFX}(make|tsc|webpack|vite|rollup|esbuild|pytest|jest|vitest|mocha)\b" \
   -e "${EXPFX}docker(-compose|[[:space:]]+compose)?[[:space:]]+(build|buildx)\b"; then
@@ -216,7 +231,7 @@ fi
 if [ -z "$NAG" ] &&
    printf '%s' "$CMD" | grep -Eq "${EXPFX}git([[:space:]]+-C[[:space:]]+[^|;&[:space:]]+)?[[:space:]]+(diff|show)([[:space:]]|$)|${EXPFX}git[^|;&]*[[:space:]]+log[^|;&]*[[:space:]](-p|--patch)([[:space:]]|$)" &&
    ! printf '%s' "$CMD" | grep -Eq -e '--(stat|numstat|shortstat|name-only|name-status|quiet|exit-code|compact-summary)\b' \
-     -e '\|[[:space:]]*(head|tail|wc|grep|rg|sed|awk|cut|sort|uniq)\b'; then
+     -e "$BOUNDED"; then
   NAG='veil: whole-diff dump — retry EXACTLY as sh_run {"command":"<this same command string>"}, then pull just the hunk you need with sh_detail {"id":"<id>","selector":"stdout","match":"<regex>"}. A full diff is usually thousands of tokens of which you read ten lines. Use --stat/--name-only if you only need the file list. Prefix VEIL_BYPASS=1 to force Bash.'
 fi
 
