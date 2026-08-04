@@ -3,6 +3,38 @@
 All notable changes to veil-mcp. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is pre-1.0 and experimental.
 
+## [Unreleased]
+
+Follow-up measurement one week after 0.8.0, over 378 sessions / 7 days: `sh_run` took
+1,359 calls at a 0.1% error rate against raw Bash's 2.6% (7,971 calls), and coverage rose
+from 10.7% to 14.6% of all shell operations. Both fixes below come from that window —
+one from the argument keys agents actually sent, one from replaying every real hook block
+against the current guard instead of trusting the pre-0.8.0 audit script's labels.
+
+### Fixed
+- **`sh_run` honors the Bash tool's argument names instead of dropping them.** `timeout`
+  (131 calls), `description` (55) and `run_in_background` (4) were undeclared, so zod
+  stripped them *before* the handler ran: every one of those timeouts silently went
+  unapplied and each "background" run blocked to completion. They are now declared and
+  normalized — `timeout` is milliseconds like its Bash counterpart and accepts the string
+  form the callers actually send, `run_in_background` maps to `background`, `description`
+  is accepted and ignored. A `timeout` under 1000 is refused with a corrective message
+  rather than silently giving the command a 30ms budget, which is what a caller who meant
+  seconds would get and never diagnose.
+- **The VERBOSE class no longer blocks a command whose output is already bounded.**
+  `npx tsc --noEmit 2>&1 | head -20`, `pnpm build 2>&1 | tail -30` and
+  `npm run test:run 2>&1 | grep -E "Tests" | tail -2` were 3 of the 18 real blocks in the
+  window. When the caller has already piped into `head`/`tail`/`wc`/`grep`/`rg`/`sed`/
+  `awk`/`cut`/`sort`/`uniq`, condensing buys nothing and the nag only costs a turn — the
+  whole-diff class conceded this from the start, and the two classes now share one
+  `BOUNDED` pattern so they cannot drift apart again. `| cat` still bounds nothing and
+  still nags.
+
+### Note
+The heredoc sanitizer shipped in 0.8.0 was **not** at fault for the blocks a stale audit
+script had labeled false positives; replaying them against the current guard shows those
+commands ended in a genuine `&& npx vitest`/`pnpm build`. Minimal heredoc repros pass.
+
 ## [0.8.0] — 2026-07-27
 
 Driven by measurement rather than design taste: a 30-day audit of real Claude Code

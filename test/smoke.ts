@@ -273,6 +273,15 @@ if (guardExit("rm -rf /tmp/__veil_probe") === 2) {
   for (const cmd of ["docker ps", "docker logs app", "bun run dev", "npm run start", "deno run --watch x"]) {
     check(`guard: allows passthrough ${cmd}`, guardExit(cmd) === 0);
   }
+  // A BOUNDING PIPE means the caller already limited the output, so the premise of the
+  // verbose block (sh_run condenses a wall of text) no longer holds — same concession the
+  // whole-diff class always made. A 7-day replay of real blocks found 3 of 18 were these.
+  for (const cmd of ["npx tsc --noEmit 2>&1 | head -20", "pnpm build 2>&1 | tail -30", 'npm run test:run 2>&1 | grep -E "Tests" | tail -2', "npm install | wc -l"]) {
+    check(`guard: allows bounded ${cmd}`, guardExit(cmd) === 0);
+  }
+  // `| cat` bounds nothing and was the most common dump idiom — it must still nag, for
+  // both classes. This is what keeps the exemption from becoming a universal bypass.
+  check("guard: | cat does not count as bounding", guardExit("npm install | cat") === 2 && guardExit("git diff main..feat | cat") === 2);
   // Narrowed rm: recursion (or force+glob) is the blast radius — a non-recursive
   // single-file delete must pass; -r/-R/--recursive and force+glob still block.
   check("guard: allows plain rm file.txt", guardExit("rm file.txt") === 0);
@@ -1114,6 +1123,26 @@ check("sh_kill with nothing live reports nothing to stop", String(killNothing.er
 // and then deny it) — the aliased foreground run is still the answer.
 const detailAfterBg = JSON.parse(text(await eC.callTool({ name: "sh_detail", arguments: { selector: "meta" } })));
 check("sh_detail default prefers a run it can actually serve", typeof detailAfterBg.id === "string" && detailAfterBg.error === undefined);
+
+// The other three Bash-shaped keys are honored too, not silently stripped. `timeout` is
+// milliseconds and arrives as a STRING in the wild, so the string form must work; a value
+// too small to be a real ms budget is REFUSED rather than run with a 30ms limit, because a
+// caller who meant seconds would never diagnose the resulting failure.
+// NB: these run AFTER the id-less resolution checks above on purpose — every extra sh_run
+// here moves "the most recent run", which is exactly what those checks pin down.
+const tAlias = JSON.parse(text(await eC.callTool({ name: "sh_run", arguments: { command: "echo t", cwd: ergWork, timeout: "60000" } })));
+check("sh_run honors the timeout alias (string ms)", tAlias.ok === true && tAlias.stdout === "t");
+const tSmall = JSON.parse(text(await eC.callTool({ name: "sh_run", arguments: { command: "echo t", cwd: ergWork, timeout: 30 } })));
+check("sh_run refuses a seconds-shaped timeout", String(tSmall.error).includes("MILLISECONDS"));
+const tBoth = JSON.parse(text(await eC.callTool({ name: "sh_run", arguments: { command: "echo t", cwd: ergWork, timeout: 5, timeout_ms: 60000 } })));
+check("sh_run prefers timeout_ms over the alias", tBoth.ok === true && tBoth.stdout === "t");
+const descIgnored = JSON.parse(text(await eC.callTool({ name: "sh_run", arguments: { command: "echo d", cwd: ergWork, description: "Bash-shaped noise" } })));
+check("sh_run accepts and ignores description", descIgnored.ok === true && descIgnored.stdout === "d");
+// run_in_background must take the SAME early-return path as background — proof is that it
+// answers with a running handle instead of a completed result.
+const ribBg = JSON.parse(text(await eC.callTool({ name: "sh_run", arguments: { command: "sleep 5", cwd: ergWork, run_in_background: true } })));
+check("sh_run honors the run_in_background alias", ribBg.status === "running" && typeof ribBg.id === "string");
+await eC.callTool({ name: "sh_kill", arguments: { id: ribBg.id } });
 
 // sh_checkpoint with NO label auto-numbers; sh_restore with NO label takes the newest.
 const ergCkpt = mkdtempSync(join(tmpdir(), "veil-erg-ckpt-"));

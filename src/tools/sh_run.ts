@@ -129,6 +129,24 @@ export function registerShRun(server: McpServer): void {
           .string()
           .optional()
           .describe("Alias for `command`, accepted so a wrong-key call still runs. Prefer `command`."),
+        // Same reasoning as `cmd`, for the other three keys the harness's own Bash tool
+        // spells differently. A 30-day audit of real sessions found `timeout` on 131
+        // sh_run calls, `description` on 55 and `run_in_background` on 4 — zod stripped
+        // every one before the handler ran, so the timeout the caller asked for was
+        // silently NOT applied and a "background" run blocked to completion instead.
+        // Silently ignoring a key the caller believes in is worse than either honoring
+        // it or rejecting it; declaring them here is what lets the handler honor them.
+        timeout: z
+          .union([z.number(), z.string()])
+          .optional()
+          .describe(
+            "Alias for `timeout_ms`, in MILLISECONDS (same unit as the Bash tool's `timeout`). Prefer timeout_ms.",
+          ),
+        run_in_background: z.boolean().optional().describe("Alias for `background`. Prefer `background`."),
+        description: z
+          .string()
+          .optional()
+          .describe("Accepted and IGNORED — sh_run needs no description. Declared only so the key cannot vanish silently."),
         cwd: z.string().optional().describe("Working directory. Defaults to the server's cwd."),
         full: z
           .boolean()
@@ -217,7 +235,7 @@ export function registerShRun(server: McpServer): void {
           ),
       },
     },
-    async ({ command: commandArg, cmd, cwd, full, timeout_ms, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview, scrub_env, no_store, background }) => {
+    async ({ command: commandArg, cmd, cwd, full, timeout_ms: timeoutMsArg, timeout: timeoutAlias, expect, retries, retry_on_exit, backoff_ms, sandbox, trace, preview, scrub_env, no_store, background: backgroundArg, run_in_background }) => {
       // Accept the `cmd` alias, but keep the corrective message for a call that carries
       // no command at all — it teaches the minimal call shape in-band instead of leaving
       // the caller to guess from a zod dump.
@@ -236,6 +254,33 @@ export function registerShRun(server: McpServer): void {
           isError: true,
         };
       }
+      // Normalize the Bash-shaped aliases into the canonical options the rest of this
+      // handler reads. `timeout` arrives as a STRING in practice (the audited calls were
+      // all "60000".."900000") because that is how the Bash tool's own arg is written,
+      // so coerce rather than demand a number. Every audited value was >= 60000 — there
+      // is no seconds/milliseconds ambiguity to guess at — but a suspiciously small one
+      // is refused instead of silently giving the command a 30ms budget, which is the
+      // failure mode a caller who meant seconds would never diagnose.
+      const background = backgroundArg ?? run_in_background;
+      let timeout_ms = timeoutMsArg;
+      if (timeout_ms === undefined && timeoutAlias !== undefined) {
+        const n = typeof timeoutAlias === "string" ? Number(timeoutAlias.trim()) : timeoutAlias;
+        if (!Number.isFinite(n) || n < 1000) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: `"timeout" is an alias for timeout_ms and is measured in MILLISECONDS; ${JSON.stringify(timeoutAlias)} is not a usable value (must be a number >= 1000). If you meant seconds, multiply by 1000.`,
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        timeout_ms = Math.trunc(n);
+      }
+
       const origin = cwd ?? process.cwd();
       let workdir = origin;
 
